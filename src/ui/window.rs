@@ -16,6 +16,7 @@ use gtk::{gio, Orientation};
 
 use adw::prelude::*;
 
+use super::charts::{ChartNode, ChartState};
 use super::result_view::ResultView;
 use super::scan_row::ScanRow;
 use super::start_page::StartPage;
@@ -23,6 +24,15 @@ use super::{ChartMode, StartLocation};
 use crate::models::DisplayNode;
 use crate::scanner::{ScanHandle, ScanUpdate};
 use crate::settings::{Settings, WindowSize};
+
+/// Column sort state mirrored from the view's header (docs/04 §3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SortKey {
+    Name,
+    Size,
+    Items,
+    Modified,
+}
 
 pub struct ArborUi {
     pub window: adw::ApplicationWindow,
@@ -54,6 +64,8 @@ struct WindowState {
     current_folder: PathBuf,
     /// Auto-select the largest child on the next rebuild (docs/04 §2).
     pending_autoselect: bool,
+    /// Column sort state (mirrors the header, docs/04 §3).
+    sort: (SortKey, bool),
 }
 
 impl ArborUi {
@@ -150,6 +162,7 @@ impl ArborUi {
                 expanded: HashSet::new(),
                 current_folder: PathBuf::new(),
                 pending_autoselect: false,
+                sort: (SortKey::Size, true),
             }),
         });
 
@@ -259,6 +272,68 @@ impl ArborUi {
         }
         self.window.add_action(&toggle_expand);
 
+        // Treemap interactions (docs/04 §8): click selects the matching row
+        // (falling back to the nearest visible ancestor when the hit item is
+        // hidden inside a collapsed folder), double-click on a folder region
+        // navigates into it. The context menu is wired in the item-actions
+        // phase (docs/05).
+        {
+            let ui = self.clone();
+            self.result_view.treemap_chart.connect_rect_selected(
+                move |_, path| {
+                    let p = PathBuf::from(&path);
+                    if ui.result_view.select_row_by_path(&p) {
+                        return;
+                    }
+                    let mut anc = p.parent();
+                    while let Some(a) = anc {
+                        if ui.result_view.select_row_by_path(&a) {
+                            return;
+                        }
+                        anc = a.parent();
+                    }
+                },
+            );
+        }
+        {
+            let ui = self.clone();
+            self.result_view.treemap_chart.connect_rect_activated(
+                move |_, path| {
+                    ui.navigate_within_scan(Path::new(&path));
+                },
+            );
+        }
+
+        // Selection drives the charts: the treemap follows the selection and
+        // the selected ring segment is highlighted (docs/04 §7–§8).
+        {
+            let ui = self.clone();
+            self.result_view
+                .selection
+                .connect_selection_changed(move |_, _, _| {
+                    ui.update_charts();
+                });
+        }
+
+        // Header sorting: clicking a header mutates the view's internal
+        // ColumnViewSorter in place — its `changed` signal (not the property's
+        // notify) carries the new order. The order is mirrored into a sibling
+        // sort during the row rebuild — a flat model sorter would interleave
+        // expanded children, so the hierarchy is preserved here.
+        if let Some(sorter) = self.result_view.column_view.sorter() {
+            let ui = self.clone();
+            sorter.connect_changed(move |_, _| ui.apply_header_sort());
+        }
+        {
+            let ui = self.clone();
+            self.result_view
+                .column_view
+                .connect_notify_local(Some("sorter"), move |_, _| {
+                    ui.apply_header_sort();
+                });
+        }
+        self.apply_header_sort();
+
         // Escape in a result view navigates back, even mid-scan (S22);
         // dialogs handle their own Escape first.
         {
@@ -288,6 +363,30 @@ impl ArborUi {
                 glib::Propagation::Proceed
             });
         }
+    }
+
+    /// Read the view's primary sort column/direction and rebuild the rows if
+    /// it differs from the mirrored state.
+    fn apply_header_sort(self: &Rc<Self>) {
+        let Some(sorter) = self.result_view.column_view.sorter() else { return };
+        let Some(cvs) = sorter.downcast_ref::<gtk::ColumnViewSorter>() else { return };
+        let Some(col) = cvs.primary_sort_column() else { return };
+        let key = match col.title().unwrap_or_default().as_str() {
+            "Folder" => SortKey::Name,
+            "Size" => SortKey::Size,
+            "Contents" => SortKey::Items,
+            "Modified" => SortKey::Modified,
+            _ => return,
+        };
+        let descending = cvs.primary_sort_order() == gtk::SortType::Descending;
+        {
+            let mut state = self.state.borrow_mut();
+            if state.sort == (key, descending) {
+                return;
+            }
+            state.sort = (key, descending);
+        }
+        self.rebuild_rows();
     }
 
     fn activate_start_location(self: &Rc<Self>, loc: &StartLocation) {
@@ -513,14 +612,12 @@ impl ArborUi {
         let largest = current
             .children
             .iter()
-            .enumerate()
-            .filter(|(_, c)| c.measured || !c.is_dir)
-            .max_by_key(|(_, c)| c.size)
-            .map(|(i, _)| i);
+            .filter(|c| c.measured || !c.is_dir)
+            .max_by_key(|c| c.size)
+            .map(|c| c.path.clone());
         drop(state);
-        if let Some(index) = largest {
-            // +1 for the pinned location row.
-            self.result_view.select_position((index + 1) as u32);
+        if let Some(path) = largest {
+            self.result_view.select_row_by_path(&path);
         }
     }
 
@@ -529,10 +626,52 @@ impl ArborUi {
         let rows = {
             let state = self.state.borrow();
             let Some(tree) = &state.tree else { return };
+            let Some(root) = state.current.as_ref().and_then(|p| tree.find(p)) else {
+                return;
+            };
             let Some(current) = tree.find(&state.current_folder) else { return };
-            build_rows(current, &state.expanded)
+            build_rows(current, root, &state.expanded, state.sort)
         };
         self.result_view.set_rows(&rows);
+        self.update_charts();
+    }
+
+    /// Rebuild the shared chart state from the tree + selection and push it
+    /// to both charts (docs/04 §7–§8).
+    fn update_charts(&self) {
+        let state = self.state.borrow();
+        let Some(tree) = &state.tree else { return };
+        let Some(root) = state.current.as_ref().and_then(|p| tree.find(p)) else {
+            return;
+        };
+        let Some(current) = tree.find(&state.current_folder) else { return };
+
+        let root_children = sorted_root_children(root);
+
+        // The location row counts as "current folder", not a selection.
+        let selected_path = self
+            .result_view
+            .selected_row()
+            .map(|r| r.path().to_string())
+            .filter(|p| p != &current.path.display().to_string());
+
+        // Treemap follows the selection: the selected folder's subtree, the
+        // current folder for a selected file (it stays highlighted inside it),
+        // or the current folder when nothing is selected (docs/04 §8).
+        let treemap_src = selected_path
+            .as_deref()
+            .and_then(|p| tree.find(Path::new(p)))
+            .filter(|n| n.is_dir)
+            .unwrap_or(current);
+
+        let chart_state = Rc::new(ChartState {
+            rings_root: to_chart_node(current, root, &root_children),
+            treemap_root: to_chart_node(treemap_src, root, &root_children),
+            selected_path,
+        });
+        drop(state);
+        self.result_view.rings_chart.set_state(Some(chart_state.clone()));
+        self.result_view.treemap_chart.set_state(Some(chart_state));
     }
 
     fn show_chart_page(&self) {
@@ -663,39 +802,54 @@ fn propagate_add(parent: &mut DisplayNode, old_child_size: u64) {
 
 /// Build the flat row list: pinned location row + sorted children, expanded
 /// folders inline (docs/04 §2, docs/02 §3).
-fn build_rows(current: &DisplayNode, expanded: &HashSet<PathBuf>) -> Vec<ScanRow> {
+fn build_rows(
+    current: &DisplayNode,
+    root: &DisplayNode,
+    expanded: &HashSet<PathBuf>,
+    sort: (SortKey, bool),
+) -> Vec<ScanRow> {
     let total = current.size.max(1);
     let mut rows = Vec::new();
 
     // Pinned location row with up-arrow (docs/02 §3).
     let loc = ScanRow::new(current.path.clone());
-    fill_row(&loc, current, total, true, 0, false);
+    fill_row(&loc, current, root, total, true, 0, false);
     rows.push(loc);
 
-    emit_children(current, expanded, total, 1, &mut rows);
+    emit_children(current, root, expanded, total, sort, 1, &mut rows);
     rows
 }
 
 fn emit_children(
     node: &DisplayNode,
+    root: &DisplayNode,
     expanded: &HashSet<PathBuf>,
     total: u64,
+    sort: (SortKey, bool),
     depth: u32,
     rows: &mut Vec<ScanRow>,
 ) {
-    // Initial order: size descending, ties by case-insensitive name (D7).
+    // Siblings sort by the active column; expanded children stay nested
+    // under their parent (hierarchy beats flat sorting, docs/04 §3).
     let mut children: Vec<&DisplayNode> = node.children.iter().collect();
+    let (key, descending) = sort;
     children.sort_by(|a, b| {
-        b.size
-            .cmp(&a.size)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        let ord = match key {
+            SortKey::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            SortKey::Size => a.size.cmp(&b.size),
+            SortKey::Items => a.items.cmp(&b.items),
+            SortKey::Modified => a.mtime.unwrap_or(0).cmp(&b.mtime.unwrap_or(0)),
+        };
+        let ord = if descending { ord.reverse() } else { ord };
+        // Stable tie-break: case-insensitive name ascending.
+        ord.then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     for child in children {
         let row = ScanRow::new(child.path.clone());
-        fill_row(&row, child, total, false, depth, expanded.contains(&child.path));
+        fill_row(&row, child, root, total, false, depth, expanded.contains(&child.path));
         rows.push(row);
         if child.is_dir && expanded.contains(&child.path) {
-            emit_children(child, expanded, total, depth + 1, rows);
+            emit_children(child, root, expanded, total, sort, depth + 1, rows);
         }
     }
 }
@@ -703,6 +857,7 @@ fn emit_children(
 fn fill_row(
     row: &ScanRow,
     node: &DisplayNode,
+    root: &DisplayNode,
     total: u64,
     is_location: bool,
     depth: u32,
@@ -729,6 +884,53 @@ fn fill_row(
     row.set_depth(depth);
     row.set_has_children(node.is_dir && (!node.measured || !node.children.is_empty()));
     row.set_expanded(is_expanded);
+    // Name color matches the chart segment (docs/10 §5).
+    let color = if node.error {
+        crate::ui::palette::ERROR_COLOR.to_string()
+    } else {
+        crate::ui::palette::color_for(&node.path, &root.path, &sorted_root_children(root))
+    };
+    row.set_color(color.as_str());
+}
+
+/// The scan root's children as name-sorted paths — the stable palette index
+/// shared by list rows and chart segments.
+fn sorted_root_children(root: &DisplayNode) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = root.children.iter().map(|c| c.path.clone()).collect();
+    v.sort_by(|a, b| {
+        let an = a
+            .file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        let bn = b
+            .file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        an.cmp(&bn)
+    });
+    v
+}
+
+/// Snapshot a `DisplayNode` subtree into a colored `ChartNode`.
+fn to_chart_node(node: &DisplayNode, root: &DisplayNode, root_children: &[PathBuf]) -> ChartNode {
+    let color = if node.error {
+        crate::ui::palette::ERROR_COLOR.to_string()
+    } else {
+        crate::ui::palette::color_for(&node.path, &root.path, root_children)
+    };
+    let mut children: Vec<&DisplayNode> = node.children.iter().collect();
+    children.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    ChartNode {
+        name: node.name.clone(),
+        size: node.size,
+        color,
+        is_dir: node.is_dir,
+        path: node.path.display().to_string(),
+        children: children
+            .iter()
+            .map(|c| to_chart_node(c, root, root_children))
+            .collect(),
+    }
 }
 
 fn load_settings() -> Settings {

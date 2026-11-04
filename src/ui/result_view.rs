@@ -1,14 +1,15 @@
 //! Result view: two-pane layout with the item list on the left and the chart
 //! pane on the right (docs/04 §1), plus the always-on infobar (docs/04 §6).
 
-// The chart pages and sort wiring land with the visualization phase; some
-// accessors are reserved for it.
+// The context-menu wiring lands with the item-actions phase.
 #![allow(dead_code)]
 
 use gtk::gio;
+use gtk::glib;
 use gtk::prelude::*;
 use gtk::{Align, Orientation};
 
+use super::charts::{RingsChart, TreemapChart};
 use super::scan_row::ScanRow;
 use super::ChartMode;
 
@@ -22,6 +23,8 @@ pub struct ResultView {
     pub spinner: gtk::Spinner,
     pub toggle_rings: gtk::ToggleButton,
     pub toggle_treemap: gtk::ToggleButton,
+    pub rings_chart: RingsChart,
+    pub treemap_chart: TreemapChart,
 }
 
 impl ResultView {
@@ -60,16 +63,24 @@ impl ResultView {
         let folder_col = gtk::ColumnViewColumn::new(Some("Folder"), Some(folder_factory()));
         folder_col.set_resizable(true);
         folder_col.set_expand(true);
+        folder_col.set_sorter(Some(&row_sorter(CellKind::Name)));
         column_view.append_column(&folder_col);
         let size_col = text_column("Size", CellKind::Size);
         size_col.set_fixed_width(88);
+        size_col.set_sorter(Some(&row_sorter(CellKind::Size)));
         column_view.append_column(&size_col);
         let items_col = text_column("Contents", CellKind::Items);
-        items_col.set_fixed_width(74);
+        items_col.set_fixed_width(92);
+        items_col.set_sorter(Some(&row_sorter(CellKind::Items)));
         column_view.append_column(&items_col);
         let modified_col = text_column("Modified", CellKind::Modified);
         modified_col.set_fixed_width(82);
+        modified_col.set_sorter(Some(&row_sorter(CellKind::Modified)));
         column_view.append_column(&modified_col);
+
+        // Initial header state: Size ▼ (the list itself is pre-sorted this
+        // way by the window; docs/04 §3).
+        column_view.sort_by_column(Some(&size_col), gtk::SortType::Descending);
 
         let list_scroll = gtk::ScrolledWindow::new();
         list_scroll.set_vexpand(true);
@@ -91,9 +102,10 @@ impl ResultView {
         spinner.set_size_request(48, 48);
         chart_stack.add_named(&spinner, Some("spinner"));
 
-        let placeholder = gtk::Box::new(Orientation::Vertical, 0);
-        chart_stack.add_named(&placeholder, Some("rings"));
-        chart_stack.add_named(&placeholder, Some("treemap"));
+        let rings_chart = RingsChart::new();
+        chart_stack.add_named(&rings_chart, Some("rings"));
+        let treemap_chart = TreemapChart::new();
+        chart_stack.add_named(&treemap_chart, Some("treemap"));
 
         let toggle_bar = gtk::Box::new(Orientation::Horizontal, 0);
         toggle_bar.set_halign(Align::End);
@@ -120,6 +132,8 @@ impl ResultView {
             spinner,
             toggle_rings,
             toggle_treemap,
+            rings_chart,
+            treemap_chart,
         }
     }
 
@@ -158,12 +172,20 @@ impl ResultView {
             .and_downcast::<ScanRow>()
     }
 
-    /// Select the row at `position` (used to auto-select the largest child,
-    /// docs/04 §2).
-    pub fn select_position(&self, position: u32) {
-        if position < self.store.n_items() {
-            self.selection.set_selected(position);
+    /// Select the row whose path is `path` (view positions differ from store
+    /// order once header sorting is in play). Returns true on success.
+    pub fn select_row_by_path(&self, path: &std::path::Path) -> bool {
+        let want = path.to_string_lossy().to_string();
+        for i in 0..self.selection.n_items() {
+            let Some(row) = self.selection.item(i).and_downcast::<ScanRow>() else {
+                continue;
+            };
+            if row.path().as_str() == want {
+                self.selection.set_selected(i);
+                return true;
+            }
         }
+        false
     }
 }
 
@@ -290,6 +312,8 @@ fn text_column(title: &str, kind: CellKind) -> gtk::ColumnViewColumn {
             CellKind::Size => row_obj.size_str().to_string(),
             CellKind::Items => row_obj.items_str().to_string(),
             CellKind::Modified => row_obj.modified_str().to_string(),
+            // The Folder column has its own factory.
+            CellKind::Name => String::new(),
         };
         label.set_text(&text);
     });
@@ -298,7 +322,32 @@ fn text_column(title: &str, kind: CellKind) -> gtk::ColumnViewColumn {
 
 #[derive(Clone, Copy)]
 enum CellKind {
+    Name,
     Size,
     Items,
     Modified,
+}
+
+/// Header sorter for one column. The pinned location row always compares
+/// first so it stays on top in every sort order (docs/02 §3).
+fn row_compare(a: &glib::Object, b: &glib::Object, kind: CellKind) -> std::cmp::Ordering {
+    let (Some(a), Some(b)) = (a.downcast_ref::<ScanRow>(), b.downcast_ref::<ScanRow>()) else {
+        return std::cmp::Ordering::Equal;
+    };
+    match (a.is_location(), b.is_location()) {
+        (true, true) => return std::cmp::Ordering::Equal,
+        (true, false) => return std::cmp::Ordering::Less,
+        (false, true) => return std::cmp::Ordering::Greater,
+        (false, false) => {}
+    }
+    match kind {
+        CellKind::Name => a.name().to_lowercase().cmp(&b.name().to_lowercase()),
+        CellKind::Size => a.size_bytes().cmp(&b.size_bytes()),
+        CellKind::Items => a.items_count().cmp(&b.items_count()),
+        CellKind::Modified => a.mtime().cmp(&b.mtime()),
+    }
+}
+
+fn row_sorter(kind: CellKind) -> gtk::CustomSorter {
+    gtk::CustomSorter::new(move |a, b| row_compare(a, b, kind).into())
 }

@@ -8,6 +8,8 @@
 pub mod about;
 pub mod chooser;
 pub mod preferences;
+pub mod palette;
+pub mod charts;
 pub mod result_view;
 pub mod scan_row;
 pub mod shortcuts;
