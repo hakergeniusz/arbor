@@ -8,6 +8,10 @@ authors = ["hakergeniusz"]
 repository = "https://github.com/hakergeniusz/arbor"
 publish = false
 
+[lib]
+name = "arbor"
+path = "src/lib.rs"
+
 [[bin]]
 name = "arbor"
 path = "src/main.rs"
@@ -20,3 +24,6 @@ serde_json = "1"
 
 [build-dependencies]
 glib-build-tools = "0.22"
+
+[dev-dependencies]
+libc = "0.2"

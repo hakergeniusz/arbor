@@ -9,6 +9,7 @@ pub mod about;
 pub mod chooser;
 pub mod preferences;
 pub mod result_view;
+pub mod scan_row;
 pub mod shortcuts;
 pub mod start_page;
 pub mod window;

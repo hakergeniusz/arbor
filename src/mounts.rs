@@ -41,7 +41,7 @@ pub fn list_mounts() -> Vec<MountInfo> {
     let mut entries: Vec<MountInfo> = Vec::new();
     for line in data.lines() {
         let mut fields = line.split_whitespace();
-        let (Some(dev), Some(mnt), Some(fstype)) = (fields.next(), fields.next(), fields.next())
+        let (Some(dev), Some(mnt), Some(_fstype)) = (fields.next(), fields.next(), fields.next())
         else {
             continue;
         };
