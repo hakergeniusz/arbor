@@ -5,7 +5,7 @@
 //! a worker thread sends incremental `ScanUpdate`s which are merged into a
 //! `DisplayNode` tree and rendered as flat list rows.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -72,6 +72,17 @@ struct WindowState {
     /// The last successful trash operation, for the toast's Undo button
     /// (docs/06 R6).
     undo: Option<crate::trash::TrashRecord>,
+    /// Tree mutations from the scanner that the list has not shown yet.
+    rows_dirty: bool,
+    /// Auto-select deferred to the next throttled repaint (the row may not
+    /// exist in the store until the list is rebuilt).
+    select_largest: bool,
+    /// Last throttled list repaint — the list is rebuilt at most ~8×/s
+    /// while a scan streams in.
+    last_repaint: Cell<std::time::Instant>,
+    /// Last chart update — charts clone the visible subtree, so while
+    /// scanning they refresh at most 2×/s.
+    last_chart: Cell<std::time::Instant>,
 }
 
 impl ArborUi {
@@ -171,6 +182,10 @@ impl ArborUi {
                 pending_autoselect: false,
                 sort: (SortKey::Size, true),
                 undo: None,
+                rows_dirty: false,
+                select_largest: false,
+                last_repaint: Cell::new(std::time::Instant::now()),
+                last_chart: Cell::new(std::time::Instant::now()),
             }),
             item_popover: RefCell::new(None),
         });
@@ -559,8 +574,15 @@ impl ArborUi {
         self.state.borrow_mut().scan = Some(handle);
 
         // Drain scanner updates on the main loop (worker → UI bridge).
+        //
+        // Bounded per tick: a home-folder scan queues hundreds of thousands
+        // of updates, and draining them all inside one timeout callback
+        // starves the frame clock (the window manager starts showing
+        // "Not Responding"). Each tick spends at most ~6 ms merging updates;
+        // the list/charts repaint on a throttle in `repaint_rows`.
         let ui = self.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(6);
             loop {
                 match receiver.try_recv() {
                     Ok(update) => {
@@ -572,13 +594,20 @@ impl ArborUi {
                         );
                         ui.handle_scan_update(update);
                         if terminal {
+                            ui.repaint_rows(true);
                             return glib::ControlFlow::Break;
+                        }
+                        if std::time::Instant::now() >= deadline {
+                            ui.repaint_rows(false);
+                            return glib::ControlFlow::Continue;
                         }
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        ui.repaint_rows(false);
                         return glib::ControlFlow::Continue;
                     }
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        ui.repaint_rows(true);
                         return glib::ControlFlow::Break;
                     }
                 }
@@ -670,8 +699,11 @@ impl ArborUi {
                             parent.children.push(node);
                         }
                     }
+                    // Repaint on the throttle in repaint_rows, not per event —
+                    // a home-folder scan would otherwise rebuild O(rows) per
+                    // directory and O(subtree) for the charts.
+                    state.rows_dirty = true;
                 }
-                self.rebuild_rows();
             }
             ScanUpdate::DirMeasured { path, size, items, error, mtime } => {
                 let mut state = self.state.borrow_mut();
@@ -686,16 +718,12 @@ impl ArborUi {
                     propagate_delta_up(tree, &path, size.saturating_sub(old), 0);
                 }
                 let is_current = state.current_folder == path;
-                let mut select_largest = false;
                 if is_current && state.pending_autoselect {
-                    select_largest = true;
+                    state.select_largest = true;
                     state.pending_autoselect = false;
                 }
+                state.rows_dirty = true;
                 drop(state);
-                self.rebuild_rows();
-                if select_largest {
-                    self.select_largest_child();
-                }
             }
             ScanUpdate::Finished { root } => {
                 {
@@ -705,7 +733,7 @@ impl ArborUi {
                 // Completed scans enter the recents list (docs/03 §6).
                 self.settings.borrow_mut().push_recent(&root.display().to_string());
                 self.refresh_start_page();
-                self.rebuild_rows();
+                self.repaint_rows(true);
                 self.show_chart_page();
             }
             ScanUpdate::Failed { path } => {
@@ -753,6 +781,55 @@ impl ArborUi {
         };
         self.result_view.set_rows(&rows);
         self.update_charts();
+    }
+
+    /// Throttled repaint while a scan streams in (docs/03 §5 progressive
+    /// fill): tree mutations happen per update, but the list is rebuilt at
+    /// most ~8×/s and the charts (an O(subtree) projection) at most 2×/s.
+    /// `force` (terminal updates, drain end) repaints immediately.
+    fn repaint_rows(self: &Rc<Self>, force: bool) {
+        let now = std::time::Instant::now();
+        let (list_due, chart_due) = {
+            let state = self.state.borrow();
+            if !state.rows_dirty && !force {
+                (false, false)
+            } else {
+                (
+                    force
+                        || now.duration_since(state.last_repaint.get())
+                            >= std::time::Duration::from_millis(120),
+                    force
+                        || now.duration_since(state.last_chart.get())
+                            >= std::time::Duration::from_millis(500),
+                )
+            }
+        };
+        if list_due {
+            let rows = {
+                let state = self.state.borrow();
+                let Some(tree) = &state.tree else { return };
+                let Some(root) = state.current.as_ref().and_then(|p| tree.find(p)) else {
+                    return;
+                };
+                let Some(current) = tree.find(&state.current_folder) else { return };
+                build_rows(current, root, &state.expanded, state.sort)
+            };
+            self.result_view.set_rows(&rows);
+            {
+                let mut state = self.state.borrow_mut();
+                state.rows_dirty = false;
+                state.last_repaint.set(now);
+            }
+            // Deferred autoselect: the row exists only after the rebuild.
+            if self.state.borrow().select_largest {
+                self.state.borrow_mut().select_largest = false;
+                self.select_largest_child();
+            }
+        }
+        if chart_due {
+            self.update_charts();
+            self.state.borrow_mut().last_chart.set(now);
+        }
     }
 
     /// Rebuild the shared chart state from the tree + selection and push it

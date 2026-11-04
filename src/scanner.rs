@@ -104,6 +104,65 @@ pub fn should_descend(child_dev: u64, parent_dev: u64, recursive_mounts: bool) -
     recursive_mounts || child_dev == parent_dev
 }
 
+/// Coalescing sender: `DirListed` batches are flushed by size or time so a
+/// large tree produces a stream of chunky messages instead of one per
+/// directory (a real home folder easily exceeds 10⁵ directories). Every
+/// non-listed update first flushes pending listings — the UI merges a
+/// directory's entries before its measurement may refine them, so
+/// `DirListed(dir)` must always precede `DirMeasured(dir)` on the channel.
+struct Emitter {
+    sender: std::sync::mpsc::Sender<ScanUpdate>,
+    pending: Vec<EntryMeta>,
+    last_flush: std::time::Instant,
+}
+
+impl Emitter {
+    fn new(sender: std::sync::mpsc::Sender<ScanUpdate>) -> Self {
+        Emitter {
+            sender,
+            pending: Vec::new(),
+            last_flush: std::time::Instant::now(),
+        }
+    }
+
+    const MAX_BATCH: usize = 512;
+    const FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
+    fn list(&mut self, entries: Vec<EntryMeta>) {
+        self.pending.extend(entries);
+        if self.pending.len() >= Self::MAX_BATCH
+            || self.last_flush.elapsed() >= Self::FLUSH_INTERVAL
+        {
+            self.flush();
+        }
+    }
+
+    /// Send the dir listing immediately (used for the scan root, whose
+    /// message must exist even when the folder is empty).
+    fn list_now(&mut self, entries: Vec<EntryMeta>) {
+        self.flush();
+        if !entries.is_empty() {
+            let _ = self
+                .sender
+                .send(ScanUpdate::DirListed { entries });
+        }
+    }
+
+    fn flush(&mut self) {
+        if !self.pending.is_empty() {
+            let entries = std::mem::take(&mut self.pending);
+            let _ = self.sender.send(ScanUpdate::DirListed { entries });
+        }
+        self.last_flush = std::time::Instant::now();
+    }
+
+    /// Send a non-listing update, flushing pending listings first.
+    fn send(&mut self, update: ScanUpdate) {
+        self.flush();
+        let _ = self.sender.send(update);
+    }
+}
+
 fn run_scan(
     root: &Path,
     recursive_mounts: bool,
@@ -111,10 +170,11 @@ fn run_scan(
     cancel: Arc<AtomicBool>,
     sender: &std::sync::mpsc::Sender<ScanUpdate>,
 ) {
+    let mut emit = Emitter::new(sender.clone());
     let meta = match std::fs::metadata(root) {
         Ok(m) if m.is_dir() => m,
         _ => {
-            let _ = sender.send(ScanUpdate::Failed { path: root.to_path_buf() });
+            emit.send(ScanUpdate::Failed { path: root.to_path_buf() });
             return;
         }
     };
@@ -135,11 +195,13 @@ fn run_scan(
     let entries = match list_dir(root, &ignored) {
         Ok(entries) => entries,
         Err(_) => {
-            let _ = sender.send(ScanUpdate::Failed { path: root.to_path_buf() });
+            emit.send(ScanUpdate::Failed { path: root.to_path_buf() });
             return;
         }
     };
-    send_listed(&entries, sender);
+    // The root listing goes out on its own even when empty, so the UI can
+    // create the root node (and show an empty result) immediately.
+    emit.list_now(entry_metas(&entries));
 
     let root_meta_size = node_contribution(meta.size(), meta.blocks());
     let mut stack = vec![Frame {
@@ -159,7 +221,7 @@ fn run_scan(
 
     while let Some(frame) = stack.last_mut() {
         if cancel.load(Ordering::SeqCst) {
-            let _ = sender.send(ScanUpdate::Cancelled);
+            emit.send(ScanUpdate::Cancelled);
             return;
         }
         let Some(entry) = frame.pending.next() else {
@@ -169,7 +231,7 @@ fn run_scan(
             let frame = stack.pop().unwrap();
             let size = frame.own_size + frame.child_contrib;
             let items = 1 + frame.child_items;
-            let _ = sender.send(ScanUpdate::DirMeasured {
+            emit.send(ScanUpdate::DirMeasured {
                 path: frame.path.clone(),
                 size,
                 items,
@@ -196,7 +258,7 @@ fn run_scan(
                     children: Vec::new(),
                 });
             } else {
-                let _ = sender.send(ScanUpdate::Finished {
+                emit.send(ScanUpdate::Finished {
                     root: frame.path,
                 });
             }
@@ -222,17 +284,15 @@ fn run_scan(
                 Err(_) => {
                     // Unreadable directory: error row, own contribution only.
                     let own = node_contribution(meta.size(), meta.blocks());
-                    let _ = sender.send(ScanUpdate::DirListed {
-                        entries: vec![EntryMeta {
-                            name: name.clone(),
-                            path: path.clone(),
-                            is_dir: true,
-                            error: true,
-                            own_size: own,
-                            mtime: Some(meta.mtime()),
-                        }],
-                    });
-                    let _ = sender.send(ScanUpdate::DirMeasured {
+                    emit.list(vec![EntryMeta {
+                        name: name.clone(),
+                        path: path.clone(),
+                        is_dir: true,
+                        error: true,
+                        own_size: own,
+                        mtime: Some(meta.mtime()),
+                    }]);
+                    emit.send(ScanUpdate::DirMeasured {
                         path: path.clone(),
                         size: own,
                         items: 1,
@@ -243,7 +303,7 @@ fn run_scan(
                     frame.child_items += 1;
                 }
                 Ok(entries) => {
-                    send_listed(&entries, sender);
+                    emit.list(entry_metas(&entries));
                     // The dir node's own contribution and item are accounted
                     // when its frame completes (below) — do not add them
                     // here, or they would be counted twice.
@@ -290,8 +350,9 @@ fn list_dir(path: &Path, ignored: &[String]) -> std::io::Result<Vec<(Metadata, D
     Ok(out)
 }
 
-fn send_listed(entries: &[(Metadata, DirEntry)], sender: &std::sync::mpsc::Sender<ScanUpdate>) {
-    let metas = entries
+/// Map a directory listing to the wire format (name/path/size metadata).
+fn entry_metas(entries: &[(Metadata, DirEntry)]) -> Vec<EntryMeta> {
+    entries
         .iter()
         .map(|(meta, entry)| EntryMeta {
             name: entry.file_name().to_string_lossy().to_string(),
@@ -301,8 +362,7 @@ fn send_listed(entries: &[(Metadata, DirEntry)], sender: &std::sync::mpsc::Sende
             own_size: node_contribution(meta.size(), meta.blocks()),
             mtime: Some(meta.mtime()),
         })
-        .collect();
-    let _ = sender.send(ScanUpdate::DirListed { entries: metas });
+        .collect()
 }
 
 fn is_ignored(path: &Path, ignored: &[String]) -> bool {
