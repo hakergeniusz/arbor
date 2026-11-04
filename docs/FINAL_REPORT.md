@@ -133,13 +133,16 @@ analyze mount points" checkbox, S09).
 
 | Area | State | What is missing |
 |---|---|---|
-| Chooser folder-pick flow | Opens + cancels in GUI (S09); the same scan entry point is exercised via CLI arg and start-page rows | No end-to-end "pick a folder in the chooser → scan starts" GUI run |
-| Ctrl+? direct accel | Registered identically to the working Ctrl+, ; menu path verified | xdotool could not synthesize the `?` keysym — harness limitation, not app evidence |
 | Large-tree GUI behavior | **Verified** on a 480-dir/16k-file fixture: progressive fill streams rows, totals grow live, and the F10 menu opens instantly mid-scan (`8c9a923` fixed the main-loop starvation that real home folders exposed — bounded drain per tick, scanner-side `DirListed` coalescing, throttled row/chart rebuilds; protocol pinned by `coalesced_stream_replays_to_the_final_tree`) | Home-folder scale (>10⁵ dirs) not reproduced locally — mechanics are size-independent (bounded work per tick) |
-| Preferences ignore-list effect | Dialog + persistence implemented; settings round-trip unit-tested | No GUI test of an ignored location being excluded from a scan |
+| Preferences ignore-list effect | Dialog + persistence implemented; settings round-trip unit-tested; ignore filtering itself unit-tested (`ignored_subtrees_are_excluded`) | No GUI test of an ignored location being excluded from a scan (chooser-typing is unreliable in the harness) |
 | Multi-device trash undo | Candidate-dir walk unit-tested (same-device topdirs, `.Trash-$uid`) | No real second-partition Trash exercised |
-| Single-instance `arbor <folder>` | `HANDLES_OPEN` + navigate implemented | No second-instance GUI test |
-| F1 online help | Opens the project URL via GIO; failure → toast | Not exercised (no network/browser in sandbox) |
+| Help failure toast | F1 **positively verified** in GUI: the platform default URL handler launches the help page (it did open the machine's handler in the sandbox) | The "Failed to open help" toast needs a handler-less machine — failure branch logic-reviewed only |
+
+Moved to §2 (fully verified on `f53c520`): chooser end-to-end pick (sidebar →
+select folder → Open → scan starts, S09) *and* its invalid-folder branch
+(exact `… is not a valid folder` toast); Ctrl+? direct accel (Keyboard
+Shortcuts window opens); single-instance `arbor <folder>` (one process, the
+existing window navigates, S06).
 
 ## 4. Implemented but not runtime-verified
 
