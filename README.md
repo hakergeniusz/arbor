@@ -1,40 +1,71 @@
-# Arbor — Behavioral Specification
+# Arbor — see where your disk space grows
 
-This repository contains the **Team A deliverable** for the Arbor project: a
-clean-room, black-box behavioral specification of the user-facing behavior of
-GNOME Baobab (Disk Usage Analyzer), written as requirements for **Arbor**, an
-independent Rust implementation.
+Arbor is a disk usage analyzer for Linux (GTK4 / libadwaita, Rust): it
+scans folders asynchronously and shows sizes, item counts and modification
+dates as a sortable tree, plus rings and treemap visualizations. Items can
+be opened with the default handler, their path copied, and moved to the
+Trash — always behind a mandatory confirmation dialog, with an undo.
 
-## For Team B (implementation agent)
+Arbor is an **independent, clean-room implementation** of the user-facing
+behavior of GNOME Baobab 50.0, built from a black-box behavioral
+specification. It contains no upstream code. See `PROVENANCE.md`.
 
-Read the documents in `docs/` in order. Your contract is:
+## Build
 
-- `docs/00-overview.md` — scope, reading order, requirement classes
-- `docs/01-…09-…` — feature specifications, each separating *Observed
-  behavior*, *Arbor requirement*, *Design decision*, and *Unknown*
-- `docs/06-trash-safety-requirements.md` — **mandatory safety specification**,
-  read before implementing any destructive action
-- `docs/09-test-scenarios.md` — reproducible acceptance scenarios
-- `docs/10-ui-reference.md` — visual reference with screenshots
-- `docs/11-provenance-and-observation-log.md` — how the knowledge in this
-  repository was obtained
+Dependencies: Rust ≥ 1.85, GTK 4 ≥ 4.10, libadwaita ≥ 1.8, `pkg-config`.
 
-You must implement from these documents only. Do not seek or use GNOME
-Baobab's source code, and do not treat the screenshots as more than visual
-reference for layout intent.
+```
+cargo build --release
+./target/release/arbor            # start page
+./target/release/arbor <folder>   # scan that folder (single instance)
+```
 
-## Provenance statement
+## Test
 
-All observations in `docs/` were made by interacting with the installed
-`/usr/bin/baobab` (version 50.0) as an ordinary user inside an isolated Xvfb
-display, recording visible behavior and screenshots. No upstream source code,
-tests, or internal documentation was consulted. See
-`docs/11-provenance-and-observation-log.md` for the full log.
+```
+cargo test                        # unit + scanner tests, no GUI needed
+```
+
+GUI validation (Xvfb, hermetic session) and the acceptance scenarios are
+described in `docs/09-test-scenarios.md`; implementation evidence in
+`docs/FINAL_REPORT.md`.
+
+## Install / packaging
+
+| Format | Location | Status |
+|---|---|---|
+| Debian | `packaging/debian/` (`dpkg-buildpackage` from repo root) | provided, not built in CI |
+| RPM | `packaging/rpm/arbor.spec` (`rpmbuild -ba`) | provided, not built in CI |
+| Arch | `packaging/arch/PKGBUILD` (`makepkg`) | provided, not built in CI |
+| Flatpak | `packaging/flatpak/io.github.hakergeniusz.Arbor.json` | provided, not built in CI |
+
+All targets cover `x86_64` and `aarch64` (`arch: any`, `%{rust_tier1_arches}`,
+`arch=('x86_64' 'aarch64')`); only `x86_64` was exercised locally.
 
 ## Repository layout
 
 ```
-docs/           Behavioral specification (numbered reading order)
-screenshots/    Original screenshots captured during observation
-src/            (empty — reserved for Team B's Rust implementation)
+docs/           Team A behavioral specification (numbered reading order)
+screenshots/    Original UI reference screenshots from the observation
+src/            Arbor implementation (Rust, GTK4/libadwaita)
+data/           desktop file, appstream metainfo, application icon
+packaging/      deb / rpm / arch / flatpak packaging
+tests/          integration tests (scanner fixtures)
+tools/          Team A's observation harness (not used by the implementation)
 ```
+
+## Documentation
+
+- `ARCHITECTURE.md` — module map, data flow, invariants
+- `IMPLEMENTATION_NOTES.md` — decisions, GTK pitfalls, harness notes
+- `THIRD_PARTY_LICENSES.md` — dependency license audit (permissive only)
+- `CONTRIBUTING.md` — clean-room rules and development workflow
+- `LICENSE` — MIT
+
+## Provenance statement
+
+All behavioral knowledge in `docs/` was obtained by interacting with the
+installed Baobab 50.0 as an ordinary user inside an isolated Xvfb display
+(see `docs/11-provenance-and-observation-log.md`). The implementation
+consulted only those documents, the screenshots, and public GTK/Rust
+documentation — never upstream source code.

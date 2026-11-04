@@ -1,0 +1,6 @@
+arbor (1.0.0-1) unstable; urgency=medium
+
+  * Initial release (clean-room implementation of the Arbor behavioral
+    specification; see docs/ for the specification and provenance).
+
+ -- hakergeniusz <hakergeniusz@users.noreply.github.com>  Wed, 04 Nov 2026 21:45:00 +0100

@@ -1,0 +1,58 @@
+{
+    "id": "io.github.hakergeniusz.Arbor",
+    "runtime": "org.gnome.Platform",
+    "runtime-version": "50",
+    "sdk": "org.gnome.Sdk",
+    "sdk-extensions": [
+        "org.freedesktop.Sdk.Extension.rust-stable"
+    ],
+    "build-options": {
+        "append-path": "/usr/lib/sdk/rust-stable/bin",
+        "env": {
+            "CARGO_HOME": "/run/build/arbor/cargo",
+            "CARGO_TARGET_DIR": "target-flatpak"
+        }
+    },
+    "command": "arbor",
+    "finish-args": [
+        "--share=ipc",
+        "--socket=fallback-x11",
+        "--socket=wayland",
+        "--device=dri",
+        "--filesystem=host",
+        "--talk-name=org.gtk.vfs",
+        "--talk-name=org.gtk.vfs.*",
+        "--talk-name=org.freedesktop.portal.Desktop"
+    ],
+    "modules": [
+        {
+            "name": "arbor",
+            "buildsystem": "simple",
+            "build-commands": [
+                "cargo --version",
+                "cargo build --release --locked --offline",
+                "install -D -m 755 target-flatpak/release/arbor /app/bin/arbor",
+                "install -D -m 644 data/io.github.hakergeniusz.Arbor.desktop.in /app/share/applications/io.github.hakergeniusz.Arbor.desktop",
+                "install -D -m 644 data/io.github.hakergeniusz.Arbor.metainfo.xml /app/share/metainfo/io.github.hakergeniusz.Arbor.metainfo.xml",
+                "install -D -m 644 data/icons/scalable/apps/io.github.hakergeniusz.Arbor.svg /app/share/icons/hicolor/scalable/apps/io.github.hakergeniusz.Arbor.svg"
+            ],
+            "sources": [
+                {
+                    "type": "git",
+                    "url": "https://github.com/hakergeniusz/arbor",
+                    "tag": "v1.0.0",
+                    "commit": "PLACEHOLDER-SET-AT-RELEASE"
+                },
+                {
+                    "type": "archive",
+                    "url": "https://github.com/hakergeniusz/arbor/releases/download/v1.0.0/arbor-vendor-1.0.0.tar.xz",
+                    "destination": "vendor",
+                    "skip-arches": [],
+                    "disabled": true,
+                    "x-comment": "Alternative: ship a vendored cargo registry archive and add '--offline --frozen' with CARGO_HOME pointed at vendor/. The git+offline layout above requires a cargo registry mirror; prefer the vendored archive at release time."
+                }
+            ],
+            "x-notes": "The scanner reads arbitrary host paths (filesystem=host) and moves items to the host XDG Trash via gio File::trash; trash confirmation (docs/06) is enforced in-process and cannot be bypassed by the sandbox."
+        }
+    ]
+}
