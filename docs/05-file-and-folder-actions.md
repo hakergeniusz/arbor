@@ -67,7 +67,7 @@ application uses elsewhere.
   (`$XDG_DATA_HOME/Trash/{files,info}`) is created on demand.
 - **Failure case** (Trash made read-only): a toast **“Failed to trash file”**
   appears; **the item is left in place**; no deletion or fallback occurs;
-  the row remains in the list. (S14c, `screenshots/E-trash-fail-toast2.png`)
+  the row remains in the list. (S15, `screenshots/E-trash-fail-toast2.png`)
 - Cancel path: pressing Escape with the context menu open closes the menu
   and performs nothing (verified; the item stays).
 

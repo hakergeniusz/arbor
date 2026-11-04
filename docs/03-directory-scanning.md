@@ -42,7 +42,7 @@ instead of being excluded); the checkbox state is remembered per user.
 From scan start to completion:
 
 - The chart pane shows a **spinner** (an animated arc) instead of a chart.
-  (S05a, `screenshots/B-after-home-scan-enter.png`)
+  (S05, `screenshots/B-after-home-scan-enter.png`)
 - The item list is **populated progressively**: rows appear as subtrees are
   measured; sizes/counts update in place; the root row’s total changes while
   scanning (observed: root row “4.1 GB / 30744 items” → “39.5 GB /

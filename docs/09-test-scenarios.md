@@ -51,7 +51,7 @@ Ground-truth arithmetic used for verification: `du -sb` (apparent),
 | S14 | fixture-trash scan | context menu → Move to Trash (folder `trash-target`, then file) | **no confirmation**; row disappears; XDG trashinfo written; no success feedback | `E-trash-menu.png`, `E-after-trash-settled.png` |
 | S14b | after S14 | observe pinned row | totals stale (78.0 kB / 5 items) until rescan | `E-after-trash-settled.png` |
 | S15 | Trash made read-only (chmod 500) | Move to Trash | toast “Failed to trash file”; item untouched; no permanent deletion | `E-trash-fail-toast2.png` |
-| S16 | `fixture-basic / docs` view | click breadcrumb segment `fixture-basic` | navigates back to fixture-basic root | `C-ring-click-dir.png` era state |
+| S16 | `fixture-basic / docs` view | click breadcrumb segment `fixture-basic` | navigates back to fixture-basic root | `C-back-via-breadcrumb.png` |
 | S16b | rings view | hover / click ring segment | hover brightens; click (3 radii) and double-click: no effect | `C-ring-click-dir.png` |
 | S17 | fixture-perm scan | observe locked dir | row with red name, blank Size/Contents; scan completes; no dialog | `B-perm-error-scan.png` |
 | S18 | empty-dir scan | observe | single row “40 bytes / 1 item”; single flat chart tile | `B-empty-dir-scan.png` |
