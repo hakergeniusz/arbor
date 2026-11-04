@@ -235,6 +235,10 @@ fn folder_factory(row_context_cb: Rc<RefCell<Option<RowContextCb>>>) -> gtk::Sig
         let badge_bar = gtk::ProgressBar::new();
         badge_bar.add_css_class("mini");
         badge_bar.set_width_request(24);
+        // The bar's raw fraction would otherwise be concatenated into the
+        // row's accessible name ("0.985563 98.56% …"); the visible percentage
+        // label already carries the value (docs/10 §5 row format).
+        badge_bar.set_accessible_role(gtk::AccessibleRole::None);
         let badge_label = gtk::Label::new(None);
         badge_label.add_css_class("mini");
         badge_label.set_width_request(42);
@@ -252,10 +256,15 @@ fn folder_factory(row_context_cb: Rc<RefCell<Option<RowContextCb>>>) -> gtk::Sig
         list_item.set_child(Some(&row));
         attach_row_context_gesture(row.upcast_ref::<gtk::Widget>().clone(), list_item.clone(), &row_context_cb);
     });
-    factory.connect_bind(|_, obj| {
+    factory.connect_bind(move |_, obj| {
         let list_item = obj.downcast_ref::<gtk::ListItem>().expect("ListItem");
         let Some(row_obj) = list_item.item().and_downcast::<ScanRow>() else { return };
         let Some(container) = list_item.child().and_downcast::<gtk::Box>() else { return };
+        // The whole row as one readable string for assistive technology
+        // (docs/08 §1: "the complete row content is one accessible string").
+        container.update_property(&[gtk::accessible::Property::Description(
+            &row_obj.accessible_text(),
+        )]);
         // Children were appended in this order in setup.
         let Some(expander) = container.first_child().and_downcast::<gtk::Button>() else { return };
         let Some(badge) = expander.next_sibling().and_downcast::<gtk::Box>() else { return };

@@ -76,6 +76,12 @@ mod ring_imp {
         const NAME: &'static str = "ArborRingsChart";
         type Type = super::RingsChart;
         type ParentType = DrawingArea;
+
+        fn class_init(klass: &mut Self::Class) {
+            // Expose the chart to assistive technology as an image with a
+            // text summary (docs/08 §4: chart data must be SR-reachable).
+            klass.set_accessible_role(gtk::AccessibleRole::Img);
+        }
     }
 
     impl ObjectImpl for RingsChart {
@@ -236,7 +242,10 @@ impl RingsChart {
                 }
             })
             .unwrap_or_else(|| "Rings chart".to_string());
-        self.update_property(&[AccessibleProperty::Description(&text)]);
+        self.update_property(&[
+            AccessibleProperty::Label("Rings chart"),
+            AccessibleProperty::Description(&text),
+        ]);
     }
 }
 
@@ -259,6 +268,12 @@ mod tree_imp {
         const NAME: &'static str = "ArborTreemapChart";
         type Type = super::TreemapChart;
         type ParentType = DrawingArea;
+
+        fn class_init(klass: &mut Self::Class) {
+            // Expose the chart to assistive technology as an image with a
+            // text summary; keyboard focus walks the rectangles (docs/08 §4).
+            klass.set_accessible_role(gtk::AccessibleRole::Img);
+        }
     }
 
     impl ObjectImpl for TreemapChart {
@@ -556,9 +571,23 @@ impl TreemapChart {
                         if r.node.children.len() == 1 { "" } else { "s" }
                     )
                 })
+                // Before the first draw lays out the rectangles, summarize the
+                // shown folder from the state itself.
+                .or_else(|| {
+                    imp.state.borrow().as_ref().map(|s| {
+                        format!(
+                            "Treemap of {}, total {}",
+                            s.treemap_root.name,
+                            crate::format::size(s.treemap_root.size)
+                        )
+                    })
+                })
                 .unwrap_or_else(|| "Treemap chart".to_string())
         };
-        self.update_property(&[AccessibleProperty::Description(&text)]);
+        self.update_property(&[
+            AccessibleProperty::Label("Treemap chart"),
+            AccessibleProperty::Description(&text),
+        ]);
     }
 }
 

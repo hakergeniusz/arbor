@@ -41,6 +41,7 @@ pub struct ArborUi {
     back_btn: gtk::Button,
     rescan_btn: gtk::Button,
     title_start: gtk::Label,
+    menu_btn: gtk::MenuButton,
     pill: gtk::Box,
     pill_icon: gtk::Image,
     pill_segments: gtk::Box,
@@ -153,6 +154,7 @@ impl ArborUi {
             back_btn,
             rescan_btn,
             title_start,
+            menu_btn,
             pill,
             pill_icon,
             pill_segments,
@@ -376,6 +378,43 @@ impl ArborUi {
             let ui = self.clone();
             let action = gio::SimpleAction::new("undo-trash", None);
             action.connect_activate(move |_, _| ui.undo_trash());
+            self.window.add_action(&action);
+        }
+
+        // Keyboard paths for the menus (docs/08 §2, §4.2): F10 opens the
+        // Main Menu; Menu key / Shift+F10 opens the item context menu for
+        // the selected row — the keyboard equivalent of right-clicking.
+        {
+            let ui = self.clone();
+            let action = gio::SimpleAction::new("main-menu", None);
+            action.connect_activate(move |_, _| {
+                ui.menu_btn.popup();
+            });
+            self.window.add_action(&action);
+        }
+        {
+            let ui = self.clone();
+            let action = gio::SimpleAction::new("item-menu", None);
+            action.connect_activate(move |_, _| {
+                let Some(row) = ui.result_view.selected_row() else { return };
+                let path = row.path().to_string();
+                // Anchor at the focused row cell when the focus is inside
+                // the list (arrow-key navigation), else at the list top.
+                let list_type = gtk::ColumnView::static_type();
+                let (widget, x, y) = match gtk::prelude::GtkWindowExt::focus(&ui.window) {
+                    Some(w) if w.ancestor(list_type).is_some() => {
+                        // WidgetExt::allocation is superseded in 4.12.
+                        #[allow(deprecated)]
+                        let alloc = w.allocation();
+                        (w, 6.0, f64::from(alloc.height()) - 2.0)
+                    }
+                    _ => {
+                        let view = ui.result_view.column_view.clone();
+                        (view.upcast_ref::<gtk::Widget>().clone(), 150.0, 40.0)
+                    }
+                };
+                ui.show_item_menu(&path, &widget, x, y);
+            });
             self.window.add_action(&action);
         }
 

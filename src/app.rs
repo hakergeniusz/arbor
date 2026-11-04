@@ -179,6 +179,10 @@ fn register_actions(app: &adw::Application, ui: &Rc<ArborUi>) {
     app.set_accels_for_action("app.help", &["F1"]);
     app.set_accels_for_action("app.rescan", &["<Ctrl>R"]);
     app.set_accels_for_action("app.quit", &["<Ctrl>Q"]);
+    // docs/08 §2: F10 opens the Main Menu; Menu key / Shift+F10 is the
+    // keyboard path to the item context menu (docs/08 §4.2).
+    app.set_accels_for_action("win.main-menu", &["F10"]);
+    app.set_accels_for_action("win.item-menu", &["Menu", "<Shift>F10"]);
 }
 
 /// The main menu model (docs/01 §4, S02).
