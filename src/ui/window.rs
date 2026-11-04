@@ -48,6 +48,8 @@ pub struct ArborUi {
     result_view: ResultView,
     pub settings: Rc<RefCell<Settings>>,
     state: RefCell<WindowState>,
+    /// The one open item context menu, if any.
+    item_popover: RefCell<Option<gtk::PopoverMenu>>,
 }
 
 struct WindowState {
@@ -66,6 +68,9 @@ struct WindowState {
     pending_autoselect: bool,
     /// Column sort state (mirrors the header, docs/04 §3).
     sort: (SortKey, bool),
+    /// The last successful trash operation, for the toast's Undo button
+    /// (docs/06 R6).
+    undo: Option<crate::trash::TrashRecord>,
 }
 
 impl ArborUi {
@@ -163,7 +168,9 @@ impl ArborUi {
                 current_folder: PathBuf::new(),
                 pending_autoselect: false,
                 sort: (SortKey::Size, true),
+                undo: None,
             }),
+            item_popover: RefCell::new(None),
         });
 
         ui.wire_handlers();
@@ -332,16 +339,89 @@ impl ArborUi {
                     ui.apply_header_sort();
                 });
         }
+        // Item actions (docs/05): Open Externally / Copy Path to Clipboard /
+        // Move to Trash, offered from the context menu on list rows and
+        // treemap rectangles.
+        {
+            let ui = self.clone();
+            let action = gio::SimpleAction::new("open-externally", Some(&glib::VariantTy::STRING));
+            action.connect_activate(move |_, param| {
+                if let Some(path) = param.and_then(|p| p.str()) {
+                    ui.open_externally(path);
+                }
+            });
+            self.window.add_action(&action);
+        }
+        {
+            let ui = self.clone();
+            let action = gio::SimpleAction::new("copy-path", Some(&glib::VariantTy::STRING));
+            action.connect_activate(move |_, param| {
+                if let Some(path) = param.and_then(|p| p.str()) {
+                    ui.copy_path(path);
+                }
+            });
+            self.window.add_action(&action);
+        }
+        {
+            let ui = self.clone();
+            let action = gio::SimpleAction::new("trash-item", Some(&glib::VariantTy::STRING));
+            action.connect_activate(move |_, param| {
+                if let Some(path) = param.and_then(|p| p.str()) {
+                    ui.begin_trash(path);
+                }
+            });
+            self.window.add_action(&action);
+        }
+        {
+            let ui = self.clone();
+            let action = gio::SimpleAction::new("undo-trash", None);
+            action.connect_activate(move |_, _| ui.undo_trash());
+            self.window.add_action(&action);
+        }
+
+        // Right-click on a row selects it and opens the context menu
+        // (docs/05 §1). The gesture lives on the row widgets (see
+        // ResultView); here we receive the resolved row.
+        {
+            let ui = self.clone();
+            self.result_view.connect_row_context(
+                move |row, position, widget, x, y| {
+                    ui.result_view.selection.set_selected(position);
+                    let path = row.path().to_string();
+                    ui.show_item_menu(&path, widget, x, y);
+                },
+            );
+        }
+
+        // Right-click on a treemap rectangle opens the same menu (docs/05 §1:
+        // observed in both chart modes).
+        {
+            let ui = self.clone();
+            self.result_view.treemap_chart.connect_rect_context(
+                move |_, path, x, y| {
+                    ui.show_item_menu(
+                        &path,
+                        ui.result_view.treemap_chart.upcast_ref::<gtk::Widget>(),
+                        x,
+                        y,
+                    );
+                },
+            );
+        }
+
         self.apply_header_sort();
 
         // Escape in a result view navigates back, even mid-scan (S22);
-        // dialogs handle their own Escape first.
+        // dialogs handle their own Escape first, and so does the item
+        // context menu (S14/S15: Escape with the menu open closes it and
+        // performs nothing).
         {
             let ui = self.clone();
             let controller = gtk::EventControllerKey::new();
             controller.connect_key_pressed(move |_, key, _, _| {
                 if key == gtk::gdk::Key::Escape
                     && ui.window.visible_dialog().is_none()
+                    && !ui.focus_in_popover()
                     && ui.current_location().is_some()
                 {
                     ui.show_start();
@@ -758,6 +838,139 @@ impl ArborUi {
                 }
             });
             self.pill_segments.append(&btn);
+        }
+    }
+
+    /// True when the keyboard focus is inside one of our popovers (the item
+    /// context menu) — Escape belongs to it then, not to navigation.
+    fn focus_in_popover(&self) -> bool {
+        gtk::prelude::GtkWindowExt::focus(&self.window)
+            .and_then(|w| w.ancestor(gtk::Popover::static_type()))
+            .is_some()
+    }
+
+    /// Open the item context menu (docs/05 §1) at a position expressed in
+    /// `source` widget coordinates.
+    fn show_item_menu(&self, path: &str, source: &gtk::Widget, x: f64, y: f64) {
+        if let Some(old) = self.item_popover.borrow_mut().take() {
+            old.unparent();
+        }
+        let menu = gio::Menu::new();
+        for (label, action) in [
+            ("Open Externally", "win.open-externally"),
+            ("Copy Path to Clipboard", "win.copy-path"),
+            ("Move to Trash", "win.trash-item"),
+        ] {
+            let item = gio::MenuItem::new(Some(label), None);
+            item.set_action_and_target_value(Some(action), Some(&path.to_variant()));
+            menu.append_item(&item);
+        }
+        let popover = gtk::PopoverMenu::from_model(Some(&menu));
+        popover.set_parent(&self.result_view.root);
+        if let Some(pt) = source.compute_point(
+            &self.result_view.root,
+            &gtk::graphene::Point::new(x as f32, y as f32),
+        ) {
+            popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
+                pt.x() as i32,
+                pt.y() as i32,
+                1,
+                1,
+            )));
+        }
+        popover.popup();
+        *self.item_popover.borrow_mut() = Some(popover);
+    }
+
+    /// Launch the item with the system default handler; on failure a
+    /// non-blocking toast, no fallback (docs/05 §2).
+    fn open_externally(self: &Rc<Self>, path: &str) {
+        let uri = gio::File::for_path(path).uri();
+        let ui = self.clone();
+        glib::spawn_future_local(async move {
+            if gio::AppInfo::launch_default_for_uri_future(
+                &uri,
+                None::<&gio::AppLaunchContext>,
+            )
+            .await
+            .is_err()
+            {
+                ui.toast("Failed to open file");
+            }
+        });
+    }
+
+    /// Copy the absolute path to the clipboard (docs/05 §3, with the
+    /// documented "Copied to clipboard" toast).
+    fn copy_path(&self, path: &str) {
+        if let Some(display) = gtk::gdk::Display::default() {
+            display.clipboard().set_text(path);
+            self.toast("Copied to clipboard");
+        }
+    }
+
+    /// Ask for confirmation, then trash (docs/06 R1–R4). Nothing happens
+    /// unless the user explicitly confirms.
+    fn begin_trash(self: &Rc<Self>, path: &str) {
+        let p = PathBuf::from(path);
+        let is_dir = std::fs::metadata(&p).map(|m| m.is_dir()).unwrap_or(true);
+        let ui = self.clone();
+        let p_for_confirm = p.clone();
+        crate::ui::confirm::confirm_trash(&self.window, &p, is_dir, move || {
+            ui.do_trash(&p_for_confirm);
+        });
+    }
+
+    /// Move the item to the Trash and refresh immediately (docs/06 R5, R6,
+    /// R8). Failure leaves the item in place; there is no deletion fallback.
+    fn do_trash(self: &Rc<Self>, path: &Path) {
+        let is_dir = std::fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false);
+        let record = crate::trash::undo_record(path);
+        if let Err(err) = crate::trash::trash(path) {
+            let kind = if is_dir { "folder" } else { "file" };
+            self.toast(&format!("Failed to move {} to Trash", kind));
+            eprintln!("arbor: trash failed for {}: {err}", path.display());
+            return;
+        }
+        {
+            let mut state = self.state.borrow_mut();
+            if let Some(tree) = state.tree.as_mut() {
+                tree.detach(path);
+            }
+            state.undo = Some(record);
+        }
+        // R8: row removed and totals recomputed immediately (optimistic —
+        // exact figures return with the next rescan).
+        self.rebuild_rows();
+        let toast = adw::Toast::new("Moved to Trash");
+        toast.set_timeout(5);
+        toast.set_priority(adw::ToastPriority::High);
+        toast.set_button_label(Some("Undo"));
+        toast.set_action_name(Some("win.undo-trash"));
+        self.toast_overlay.add_toast(toast);
+    }
+
+    /// Undo the last trash operation (docs/06 R6). Conservative restore:
+    /// never overwrites, never touches other trash entries.
+    fn undo_trash(self: &Rc<Self>) {
+        let record = self.state.borrow().undo.clone();
+        let Some(record) = record else { return };
+        let result = crate::trash::find_entry(&record)
+            .ok_or_else(|| "entry not found in Trash".to_string())
+            .and_then(|entry| crate::trash::restore(&entry, &record.original));
+        match result {
+            Ok(()) => {
+                self.state.borrow_mut().undo = None; // one-shot
+                self.toast("Restored from Trash");
+                // Re-measure so the restored item is shown (the displayed
+                // totals were optimistic after the trash operation).
+                if let Some(current) = self.current_location() {
+                    self.open_location(&current);
+                }
+            }
+            Err(reason) => {
+                self.toast(&format!("Failed to restore from Trash: {reason}"));
+            }
         }
     }
 

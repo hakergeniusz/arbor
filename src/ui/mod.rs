@@ -7,6 +7,7 @@
 
 pub mod about;
 pub mod chooser;
+pub mod confirm;
 pub mod preferences;
 pub mod palette;
 pub mod charts;

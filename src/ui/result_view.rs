@@ -4,6 +4,9 @@
 // The context-menu wiring lands with the item-actions phase.
 #![allow(dead_code)]
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
@@ -12,6 +15,9 @@ use gtk::{Align, Orientation};
 use super::charts::{RingsChart, TreemapChart};
 use super::scan_row::ScanRow;
 use super::ChartMode;
+
+/// Right-click callback: (row, model position, source widget, x, y).
+pub type RowContextCb = Rc<dyn Fn(&ScanRow, u32, &gtk::Widget, f64, f64)>;
 
 pub struct ResultView {
     pub root: gtk::Box,
@@ -25,6 +31,7 @@ pub struct ResultView {
     pub toggle_treemap: gtk::ToggleButton,
     pub rings_chart: RingsChart,
     pub treemap_chart: TreemapChart,
+    row_context_cb: Rc<RefCell<Option<RowContextCb>>>,
 }
 
 impl ResultView {
@@ -60,20 +67,23 @@ impl ResultView {
         column_view.set_hexpand(true);
         column_view.set_vexpand(true);
 
-        let folder_col = gtk::ColumnViewColumn::new(Some("Folder"), Some(folder_factory()));
+        let row_context_cb: Rc<RefCell<Option<RowContextCb>>> = Rc::new(RefCell::new(None));
+
+        let folder_col =
+            gtk::ColumnViewColumn::new(Some("Folder"), Some(folder_factory(row_context_cb.clone())));
         folder_col.set_resizable(true);
         folder_col.set_expand(true);
         folder_col.set_sorter(Some(&row_sorter(CellKind::Name)));
         column_view.append_column(&folder_col);
-        let size_col = text_column("Size", CellKind::Size);
+        let size_col = text_column("Size", CellKind::Size, &row_context_cb);
         size_col.set_fixed_width(88);
         size_col.set_sorter(Some(&row_sorter(CellKind::Size)));
         column_view.append_column(&size_col);
-        let items_col = text_column("Contents", CellKind::Items);
+        let items_col = text_column("Contents", CellKind::Items, &row_context_cb);
         items_col.set_fixed_width(92);
         items_col.set_sorter(Some(&row_sorter(CellKind::Items)));
         column_view.append_column(&items_col);
-        let modified_col = text_column("Modified", CellKind::Modified);
+        let modified_col = text_column("Modified", CellKind::Modified, &row_context_cb);
         modified_col.set_fixed_width(82);
         modified_col.set_sorter(Some(&row_sorter(CellKind::Modified)));
         column_view.append_column(&modified_col);
@@ -134,6 +144,7 @@ impl ResultView {
             toggle_treemap,
             rings_chart,
             treemap_chart,
+            row_context_cb,
         }
     }
 
@@ -187,6 +198,13 @@ impl ResultView {
         }
         false
     }
+
+    /// Set the right-click handler for list rows (docs/05 §1). The handler
+    /// receives the row, its model position and the click position in row
+    /// widget coordinates.
+    pub fn connect_row_context(&self, cb: impl Fn(&ScanRow, u32, &gtk::Widget, f64, f64) + 'static) {
+        *self.row_context_cb.borrow_mut() = Some(Rc::new(cb));
+    }
 }
 
 impl Default for ResultView {
@@ -196,9 +214,9 @@ impl Default for ResultView {
 }
 
 /// The "Folder" column: expander + percent badge + color-coded name.
-fn folder_factory() -> gtk::SignalListItemFactory {
+fn folder_factory(row_context_cb: Rc<RefCell<Option<RowContextCb>>>) -> gtk::SignalListItemFactory {
     let factory = gtk::SignalListItemFactory::new();
-    factory.connect_setup(|_, obj| {
+    factory.connect_setup(move |_, obj| {
         let list_item = obj.downcast_ref::<gtk::ListItem>().expect("ListItem");
         let row = gtk::Box::new(Orientation::Horizontal, 6);
         row.set_margin_start(6);
@@ -232,6 +250,7 @@ fn folder_factory() -> gtk::SignalListItemFactory {
         row.append(&badge);
         row.append(&name);
         list_item.set_child(Some(&row));
+        attach_row_context_gesture(row.upcast_ref::<gtk::Widget>().clone(), list_item.clone(), &row_context_cb);
     });
     factory.connect_bind(|_, obj| {
         let list_item = obj.downcast_ref::<gtk::ListItem>().expect("ListItem");
@@ -294,15 +313,43 @@ fn folder_factory() -> gtk::SignalListItemFactory {
 
 const ERROR_COLOR: &str = "#e01b24";
 
-fn text_column(title: &str, kind: CellKind) -> gtk::ColumnViewColumn {
+/// Right-click on a row: report it to the window's context-menu handler
+/// (docs/05 §1). The gesture is attached to the row cell; the owning
+/// ListItem supplies the item and its model position.
+fn attach_row_context_gesture(
+    widget: gtk::Widget,
+    list_item: gtk::ListItem,
+    row_context_cb: &Rc<RefCell<Option<RowContextCb>>>,
+) {
+    let gesture = gtk::GestureClick::new();
+    // GtkGestureSingle defaults to the primary button; the context menu is
+    // button 3 (docs/05 §1). Capture phase sees the press before the
+    // list's internal click gesture.
+    gesture.set_button(3);
+    gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let slot = row_context_cb.clone();
+    let item = list_item.clone();
+    let widget_for_cb = widget.clone();
+    gesture.connect_pressed(move |_gesture, _n, x, y| {
+        let Some(row) = item.item().and_downcast::<ScanRow>() else { return };
+        let position = item.position();
+        if let Some(cb) = slot.borrow().as_ref() {
+            cb(&row, position, &widget_for_cb, x, y);
+        }
+    });
+    widget.add_controller(gesture);}
+
+fn text_column(title: &str, kind: CellKind, row_context_cb: &Rc<RefCell<Option<RowContextCb>>>) -> gtk::ColumnViewColumn {
     let factory = gtk::SignalListItemFactory::new();
-    factory.connect_setup(|_, obj| {
+    let slot = row_context_cb.clone();
+    factory.connect_setup(move |_, obj| {
         let list_item = obj.downcast_ref::<gtk::ListItem>().expect("ListItem");
         let label = gtk::Label::new(None);
         label.set_halign(Align::Start);
         label.set_ellipsize(gtk::pango::EllipsizeMode::End);
         label.set_margin_end(6);
         list_item.set_child(Some(&label));
+        attach_row_context_gesture(label.upcast_ref::<gtk::Widget>().clone(), list_item.clone(), &slot);
     });
     factory.connect_bind(move |_, obj| {
         let list_item = obj.downcast_ref::<gtk::ListItem>().expect("ListItem");

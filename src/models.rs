@@ -118,10 +118,110 @@ impl DisplayNode {
         self.items = 1 + self.children.iter().map(|c| c.items).sum::<u64>();
         self.measured = true;
     }
+
+    /// Remove the node at `path` from the tree and recompute every
+    /// ancestor's aggregates (docs/06 R8: fresh totals after a trash
+    /// operation). Returns the detached node.
+    pub fn detach(&mut self, path: &Path) -> Option<DisplayNode> {
+        let Some(parent_path) = path.parent() else { return None };
+        let Some(parent) = self.find_mut(parent_path) else { return None };
+        let idx = parent.children.iter().position(|c| c.path == path)?;
+        let removed = parent.children.remove(idx);
+        // Recompute the whole ancestor chain from the remaining children.
+        let mut ancestor = parent_path;
+        loop {
+            let Some(node) = self.find_mut(ancestor) else { break };
+            node.finalize_from_children();
+            match ancestor.parent() {
+                Some(p) => ancestor = p,
+                None => break,
+            }
+        }
+        Some(removed)
+    }
 }
 
 /// Display size of a single node: larger of content length and block usage
 /// (docs/04 §4). Kept here so scanner and tests share one definition.
 pub fn node_contribution(st_size: u64, st_blocks: u64) -> u64 {
     st_size.max(st_blocks * 512)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dir(name: &str, own: u64, size: u64, items: u64, children: Vec<DisplayNode>) -> DisplayNode {
+        DisplayNode {
+            name: name.into(),
+            path: PathBuf::from(name),
+            is_dir: true,
+            error: false,
+            own_size: own,
+            size,
+            items,
+            mtime: None,
+            measured: true,
+            children,
+        }
+    }
+
+    fn file(name: &str, size: u64) -> DisplayNode {
+        DisplayNode {
+            name: name.into(),
+            path: PathBuf::from(name),
+            is_dir: false,
+            error: false,
+            own_size: size,
+            size,
+            items: 1,
+            mtime: None,
+            measured: true,
+            children: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn detach_removes_subtree_and_recomputes_ancestors() {
+        // root (own 10) -> a (own 5) -> {a1 100, a2 200}; b (file 400)
+        let mut root = dir(
+            "/root",
+            10,
+            715,
+            6,
+            vec![
+                dir(
+                    "/root/a",
+                    5,
+                    305,
+                    3,
+                    vec![file("/root/a/a1", 100), file("/root/a/a2", 200)],
+                ),
+                file("/root/b", 400),
+            ],
+        );
+        let removed = root.detach(Path::new("/root/a")).expect("detached");
+        assert_eq!(removed.path, Path::new("/root/a"));
+        assert_eq!(removed.children.len(), 2);
+        // Root recomputed: own 10 + b 400 = 410 bytes; items: root + b = 2.
+        assert_eq!(root.size, 410);
+        assert_eq!(root.items, 2);
+        assert_eq!(root.children.len(), 1);
+
+        // Detaching a file works the same way.
+        let removed = root.detach(Path::new("/root/b")).expect("detached");
+        assert_eq!(removed.size, 400);
+        assert_eq!(root.size, 10);
+        assert_eq!(root.items, 1);
+        assert!(root.children.is_empty());
+    }
+
+    #[test]
+    fn detach_missing_path_is_noop() {
+        let mut root = dir("/root", 10, 110, 2, vec![file("/root/b", 100)]);
+        assert!(root.detach(Path::new("/root/nope")).is_none());
+        assert!(root.detach(Path::new("/other/b")).is_none());
+        assert_eq!(root.size, 110);
+        assert_eq!(root.children.len(), 1);
+    }
 }

@@ -277,7 +277,7 @@ mod tree_imp {
                         .build(),
                     // Right click opens the context menu for the rectangle.
                     glib::subclass::Signal::builder("rect-context")
-                        .param_types([String::static_type()])
+                        .param_types([String::static_type(), f64::static_type(), f64::static_type()])
                         .build(),
                 ]
             })
@@ -312,6 +312,9 @@ mod tree_imp {
             area.add_controller(ctrl);
 
             let click = gtk::GestureClick::new();
+            // GtkGestureSingle defaults to the primary button; the treemap
+            // distinguishes select (1), activate (double) and context (3).
+            click.set_button(0);
             {
                 let obj = area.downgrade();
                 click.connect_pressed(move |gesture, n_press, x, y| {
@@ -322,7 +325,7 @@ mod tree_imp {
                     let path = rect.node.path.clone();
                     match (button, n_press) {
                         (3, _) => {
-                            chart.emit_by_name::<()>("rect-context", &[&path]);
+                            chart.emit_by_name::<()>("rect-context", &[&path, &x, &y]);
                         }
                         (_, 2) => {
                             // Navigate into the deepest folder containing the
@@ -525,11 +528,13 @@ impl TreemapChart {
         });
     }
 
-    pub fn connect_rect_context<F: Fn(&Self, String) + 'static>(&self, f: F) {
+    pub fn connect_rect_context<F: Fn(&Self, String, f64, f64) + 'static>(&self, f: F) {
         self.connect_local("rect-context", true, move |args| {
             let obj = args[0].get::<Self>().unwrap();
             let path = args[1].get::<String>().unwrap();
-            f(&obj, path);
+            let x = args[2].get::<f64>().unwrap();
+            let y = args[3].get::<f64>().unwrap();
+            f(&obj, path, x, y);
             None
         });
     }

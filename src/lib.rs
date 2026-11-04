@@ -6,6 +6,7 @@ pub mod format;
 pub mod models;
 pub mod mounts;
 pub mod scanner;
-pub mod squarify;
 pub mod settings;
+pub mod squarify;
+pub mod trash;
 pub mod ui;
