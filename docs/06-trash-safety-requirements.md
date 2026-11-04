@@ -124,5 +124,7 @@ dialog MUST list every affected path.
 | A7 | No privileged-execution attempt occurs (no pkexec/sudo/polkit prompts). |
 | A8 | Same guarantees hold for a single file. |
 
-Reference scenarios: S14 (trash success), S15 (trash failure), S16 (dialog
-cancel matrix) in [09 — Test Scenarios](09-test-scenarios.md).
+Reference scenarios: S14 (trash success), S15 (trash failure) in
+[09 — Test Scenarios](09-test-scenarios.md). The dialog cancel matrix (A2/A3)
+can only be exercised against Arbor — the observed application has no such
+dialog.

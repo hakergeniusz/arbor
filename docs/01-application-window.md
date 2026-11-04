@@ -91,7 +91,7 @@ No other menus or toolbars exist.
 
 ## 5. Window resizing (Observed)
 
-- Resizing is fluid; content re-lays out live. (S06/S07,
+- Resizing is fluid; content re-lays out live. (S32/S33,
   `screenshots/A-resized-1200x800.png`, `screenshots/A-resized-400x300.png`)
 - At 1200 × 800 the start-page card list keeps its maximum content width
   (~580 px) and stays horizontally centered; the “This Device” heading

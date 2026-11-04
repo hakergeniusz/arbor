@@ -22,7 +22,9 @@ reading order; the start page order is rows top-to-bottom, then Main Menu.
 
 - **Clicking (or keyboard-activating) a start-page row** opens the result
   view for that location and starts a scan (see `03`). (S05/S10)
-- Clicking a **recent** row re-scans and re-opens that folder the same way.
+- Clicking a **recent** row opens and scans that folder the same way
+  (*expected from the identical row pattern; the click itself was not
+  separately exercised — **Unknown**, Arbor treats it as a requirement*).
 
 ## 3. Row interaction semantics in the result view (Observed)
 
@@ -34,8 +36,8 @@ The item list behaves asymmetrically for folders and files:
 | Single click on the expander (▶) | Expands/collapses children inline (indented sub-rows, without navigation) | n/a |
 | Double click (list) | Navigates into the folder | no effect observed |
 
-(S12–S14, `screenshots/C-docs-navigated.png`, `C-click-file-row2.png`,
-`C-expander-l1.png`)
+(S12, S13, S13b, `screenshots/C-docs-navigated.png`,
+`C-click-file-row2.png`, `C-expander-l1.png`)
 
 - The **first row** of a result view is the scanned location itself; its
   expander area shows an **up-arrow (^)** which navigates back to the parent
@@ -69,7 +71,7 @@ Back → start page, clickable breadcrumb segments).
 - Switching is instant, no re-scan.
 - The chosen mode is **per-window state, not per-location**: after switching
   to Treemap in one location, navigating to another location (root
-  filesystem) kept Treemap active. (S20)
+  filesystem) kept Treemap active. (S29)
 - The mode was not observed to persist across application restarts —
   **Unknown**.
 
