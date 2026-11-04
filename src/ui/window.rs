@@ -678,27 +678,9 @@ impl ArborUi {
                         }));
                     }
                     let tree = state.tree.as_mut().unwrap();
-                    // Merge entries under their common parent.
-                    for meta in &entries {
-                        let Some(parent_path) = meta.path.parent() else { continue };
-                        if let Some(parent) = tree.find_mut(parent_path) {
-                            if parent
-                                .children
-                                .iter()
-                                .any(|c| c.path == meta.path)
-                            {
-                                continue; // already known; DirMeasured refines it
-                            }
-                            let node = if meta.is_dir {
-                                DisplayNode::new_dir(meta)
-                            } else {
-                                DisplayNode::new_file(meta)
-                            };
-                            parent.size += node.size;
-                            parent.items += 1;
-                            parent.children.push(node);
-                        }
-                    }
+                    // Merge entries under their own parents (shared with the
+                    // protocol tests).
+                    tree.merge_entries(&entries);
                     // Repaint on the throttle in repaint_rows, not per event —
                     // a home-folder scan would otherwise rebuild O(rows) per
                     // directory and O(subtree) for the charts.
@@ -708,15 +690,7 @@ impl ArborUi {
             ScanUpdate::DirMeasured { path, size, items, error, mtime } => {
                 let mut state = self.state.borrow_mut();
                 let Some(tree) = &mut state.tree else { return };
-                if let Some(node) = tree.find_mut(&path) {
-                    let old = node.size;
-                    node.size = size;
-                    node.items = items;
-                    node.error = error;
-                    node.mtime = Some(mtime);
-                    node.measured = true;
-                    propagate_delta_up(tree, &path, size.saturating_sub(old), 0);
-                }
+                tree.apply_measured(&path, size, items, error, mtime);
                 let is_current = state.current_folder == path;
                 if is_current && state.pending_autoselect {
                     state.select_largest = true;
@@ -1107,27 +1081,6 @@ impl ArborUi {
 }
 
 use crate::models::EntryMeta;
-
-/// After a child node's aggregate was (re)computed, roll the delta up to all
-/// ancestors so running totals stay live during the scan (docs/03 §2).
-fn propagate_delta_up(tree: &mut DisplayNode, child_path: &Path, size_delta: u64, items_delta: u64) {
-    let mut parent_path = child_path.parent();
-    while let Some(pp) = parent_path {
-        if let Some(parent) = tree.find_mut(pp) {
-            parent.size = parent.size.saturating_add(size_delta);
-            parent.items = parent.items.saturating_add(items_delta);
-            parent_path = pp.parent();
-        } else {
-            break;
-        }
-    }
-}
-
-/// When a child node is replaced (re-listed), adjust the parent aggregate.
-fn propagate_add(parent: &mut DisplayNode, old_child_size: u64) {
-    let new_total: u64 = parent.children.iter().map(|c| c.size).sum();
-    parent.size = parent.size.saturating_sub(old_child_size).max(new_total + 1);
-}
 
 /// Build the flat row list: pinned location row + sorted children, expanded
 /// folders inline (docs/04 §2, docs/02 §3).

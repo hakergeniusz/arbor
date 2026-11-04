@@ -306,3 +306,126 @@ fn mount_boundary_logic() {
     assert!(should_descend(b, a, true));
     assert!(should_descend(a, a, false));
 }
+
+/// Replay a full scan stream through the same merge/measure logic the UI
+/// uses (`models::DisplayNode`) and pin the coalescing protocol invariants
+/// (regression for the "Not Responding" fix, where `DirListed` batches are
+/// flushed by size/time):
+///
+/// 1. every listed entry finds its parent at merge time — coalescing must
+///    never reorder a directory's listing after its measurement;
+/// 2. a `DirMeasured` aggregate is final on arrival — no later listing may
+///    bump an already-measured subtree;
+/// 3. the replayed tree equals the filesystem ground truth.
+#[test]
+fn coalesced_stream_replays_to_the_final_tree() {
+    use std::collections::{HashMap, HashSet};
+
+    let dir = temp_dir("coalesce");
+    // ~1560 entries across 61 directories: large enough that the 512-entry
+    // batch threshold guarantees several coalesced `DirListed` messages.
+    let mut all_dirs = Vec::new();
+    let mut all_files = Vec::new();
+    for d in 0..30 {
+        let sub = dir.join(format!("d{d:02}"));
+        fs::create_dir_all(&sub).unwrap();
+        all_dirs.push(sub.clone());
+        for f in 0..40 {
+            let p = sub.join(format!("f{f:02}.txt"));
+            fs::write(&p, vec![b'x'; 100]).unwrap();
+            all_files.push(p);
+        }
+        let nested = sub.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        all_dirs.push(nested.clone());
+        for f in 0..10 {
+            let p = nested.join(format!("n{f:02}.txt"));
+            fs::write(&p, vec![b'y'; 100]).unwrap();
+            all_files.push(p);
+        }
+    }
+    all_dirs.push(dir.clone());
+
+    let updates = collect_updates(&dir);
+
+    let mut tree: Option<arbor::models::DisplayNode> = None;
+    let mut measured: HashMap<PathBuf, (u64, u64)> = HashMap::new();
+    for update in &updates {
+        match update {
+            ScanUpdate::DirListed { entries } => {
+                if tree.is_none() {
+                    let root_meta = entries.first().expect("root listing non-empty");
+                    let root_path = root_meta.path.parent().unwrap().to_path_buf();
+                    tree = Some(arbor::models::DisplayNode::new_dir(
+                        &arbor::models::EntryMeta {
+                            name: "root".into(),
+                            path: root_path,
+                            is_dir: true,
+                            error: false,
+                            own_size: 0,
+                            mtime: None,
+                        },
+                    ));
+                }
+                let merged = tree.as_mut().unwrap().merge_entries(entries);
+                assert_eq!(
+                    merged,
+                    entries.len(),
+                    "every entry must find its parent when merged — \
+                     a listing arrived before its parent's listing"
+                );
+            }
+            ScanUpdate::DirMeasured { path, size, items, error, mtime } => {
+                assert!(
+                    tree.as_mut()
+                        .unwrap()
+                        .apply_measured(path, *size, *items, *error, *mtime),
+                    "measured {path:?} must exist in the replayed tree"
+                );
+                measured.insert(path.clone(), (*size, *items));
+            }
+            ScanUpdate::Finished { .. } => {}
+            other => panic!("unexpected non-terminal update in collected stream: {other:?}"),
+        }
+    }
+    let tree = tree.expect("root listing created the tree");
+
+    // Invariant 2: measured aggregates were never refined afterwards.
+    for (path, (size, items)) in &measured {
+        let node = tree.find(path).expect("measured node present");
+        assert_eq!(
+            (node.size, node.items),
+            (*size, *items),
+            "{path:?} changed after its DirMeasured — a listing was flushed \
+             after its measurement"
+        );
+    }
+
+    // Invariant 3: replayed tree matches the filesystem and ground truth.
+    for d in &all_dirs {
+        assert!(tree.find(d).is_some(), "directory {d:?} missing from tree");
+    }
+    for f in &all_files {
+        assert!(tree.find(f).is_some(), "file {f:?} missing from tree");
+    }
+    let (want_size, want_items) = ground_truth(&dir);
+    let root = tree.find(&dir).unwrap();
+    assert_eq!(root.size, want_size);
+    assert_eq!(root.items, want_items);
+    assert_eq!(measured.get(&dir), Some(&(want_size, want_items)));
+
+    // Batching sanity: the stream must not carry one message per directory
+    // (61 dirs) — coalescing has to compress the listings.
+    let listed_msgs = updates
+        .iter()
+        .filter(|u| matches!(u, ScanUpdate::DirListed { .. }))
+        .count();
+    assert!(
+        listed_msgs < all_dirs.len(),
+        "expected coalesced batches, got {listed_msgs} DirListed messages \
+         for {} directories",
+        all_dirs.len()
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}

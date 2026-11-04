@@ -139,6 +139,69 @@ impl DisplayNode {
         }
         Some(removed)
     }
+
+    /// Merge a `DirListed` batch into the tree: each entry becomes a child
+    /// of its own parent path; entries whose parent is not (yet) known are
+    /// dropped by the caller's convention, so this returns how many were
+    /// merged. Duplicates are skipped — a later `DirMeasured` refines them.
+    /// This is the exact merge the UI performs per scanner update.
+    pub fn merge_entries(&mut self, entries: &[EntryMeta]) -> usize {
+        let mut merged = 0;
+        for meta in entries {
+            let Some(parent_path) = meta.path.parent() else { continue };
+            let Some(parent) = self.find_mut(parent_path) else { continue };
+            if parent.children.iter().any(|c| c.path == meta.path) {
+                continue; // already known; DirMeasured refines it
+            }
+            let node = if meta.is_dir {
+                DisplayNode::new_dir(meta)
+            } else {
+                DisplayNode::new_file(meta)
+            };
+            parent.size += node.size;
+            parent.items += 1;
+            parent.children.push(node);
+            merged += 1;
+        }
+        merged
+    }
+
+    /// Apply a `DirMeasured` aggregate: set the node's final subtree numbers
+    /// and roll the size delta up so running totals stay live during the
+    /// scan (docs/03 §2). Returns false when the path is not in the tree.
+    pub fn apply_measured(
+        &mut self,
+        path: &Path,
+        size: u64,
+        items: u64,
+        error: bool,
+        mtime: i64,
+    ) -> bool {
+        let Some(node) = self.find_mut(path) else { return false };
+        let old = node.size;
+        node.size = size;
+        node.items = items;
+        node.error = error;
+        node.mtime = Some(mtime);
+        node.measured = true;
+        propagate_delta_up(self, path, size.saturating_sub(old), 0);
+        true
+    }
+}
+
+/// After a child node's aggregate was (re)computed, roll the delta up to all
+/// ancestors so running totals stay live during the scan (docs/03 §2).
+fn propagate_delta_up(tree: &mut DisplayNode, child_path: &Path, size_delta: u64, items_delta: u64) {
+    let mut parent_path = child_path.parent();
+    while let Some(pp) = parent_path {
+        if let Some(parent) = tree.find_mut(pp) {
+            parent.size = parent.size.saturating_add(size_delta);
+            parent.items = parent.items.saturating_add(items_delta);
+            parent_path = pp.parent();
+        } else {
+            break;
+        }
+    }
 }
 
 /// Display size of a single node: larger of content length and block usage

@@ -5,8 +5,9 @@ as an independent Rust/GTK4 application. This report distinguishes what is
 **implemented and tested**, what is **implemented but not fully verified**,
 and what is **not done** — no claims beyond that.
 
-- Head: `df1fa30` (branch `implementer/arbor`), version 1.0.0
-- Test suite: **26 tests, 0 failures** (16 unit + 10 scanner-integration)
+- Head: `8c9a923` (branch `implementer/arbor`, pushed to
+  https://github.com/hakergeniusz/arbor — private), version 1.0.0
+- Test suite: **27 tests, 0 failures** (16 unit + 11 scanner-integration)
 - GUI evidence: ~70 screenshots from the hermetic Xvfb session
   (`/tmp/arbor-gui/shots/01…71`, referenced below as S###/A#–A# from
   `docs/09-test-scenarios.md`)
@@ -134,7 +135,7 @@ analyze mount points" checkbox, S09).
 |---|---|---|
 | Chooser folder-pick flow | Opens + cancels in GUI (S09); the same scan entry point is exercised via CLI arg and start-page rows | No end-to-end "pick a folder in the chooser → scan starts" GUI run |
 | Ctrl+? direct accel | Registered identically to the working Ctrl+, ; menu path verified | xdotool could not synthesize the `?` keysym — harness limitation, not app evidence |
-| Large-tree GUI behavior | Progressive fill verified on medium fixtures; 150k-file trees unit-tested headlessly | No GUI run against the 25k/150k fixtures |
+| Large-tree GUI behavior | **Verified** on a 480-dir/16k-file fixture: progressive fill streams rows, totals grow live, and the F10 menu opens instantly mid-scan (`8c9a923` fixed the main-loop starvation that real home folders exposed — bounded drain per tick, scanner-side `DirListed` coalescing, throttled row/chart rebuilds; protocol pinned by `coalesced_stream_replays_to_the_final_tree`) | Home-folder scale (>10⁵ dirs) not reproduced locally — mechanics are size-independent (bounded work per tick) |
 | Preferences ignore-list effect | Dialog + persistence implemented; settings round-trip unit-tested | No GUI test of an ignored location being excluded from a scan |
 | Multi-device trash undo | Candidate-dir walk unit-tested (same-device topdirs, `.Trash-$uid`) | No real second-partition Trash exercised |
 | Single-instance `arbor <folder>` | `HANDLES_OPEN` + navigate implemented | No second-instance GUI test |
@@ -171,7 +172,8 @@ analyze mount points" checkbox, S09).
 | 4 | `082be0f` feat(visualization): implement rings and treemap charts |
 | 5 | `2fbc30e` feat(actions): add context menu and mandatory trash confirmation |
 | 6 | `df1fa30` feat(a11y): keyboard menus, accessible rows and chart descriptions |
-| 7 | `build: …` (packaging, licenses, project docs, this report) |
+| 7 | `e507091` build: packaging, license audit and project documentation |
+| fix | `8c9a923` fix(scan): keep the UI responsive on large scans (first real-desktop review) |
 
 ## 7. Safety statement
 
