@@ -109,10 +109,25 @@ Full **A1–A8 acceptance matrix** on self-created fixtures:
   intact, **no deletion fallback ever** (R5/R7).
 - A6/A7 exact-item confirmation (trash A but confirm shows A, not a
   sibling); files use "Move file to Trash?" (R9).
-- **Undo**: toast (timeout 5 s) with Undo button → newest matching
-  `.trashinfo` located, item restored, `.trashinfo` removed, automatic
-  rescan shows the item again (R6). Restore refuses to overwrite or
-  escape the original parent (unit-tested).
+- **Undo**: toast with Undo button → newest matching `.trashinfo` located,
+  item restored, `.trashinfo` removed, automatic rescan shows the item
+  again (R6). Restore refuses to overwrite or escape the original parent
+  (unit-tested).
+- **Re-verified end-to-end in a fresh Xvfb session (2026-11-05, shots
+  107–131)**: baseline → context menu (R1) → file *and* folder confirmation
+  wording (R9) with full wrapped path (R2/A6) → Escape and Enter both
+  cancel with zero filesystem change (A2/A3, safe default R3) → folder
+  trash: `.trashinfo` (`Path=` + `DeletionDate=`), row removed, totals
+  118.9 kB/5 → 106.5 kB/3 with recomputed percentages and rings (A4/R8) →
+  Undo button restores + rescans (R6) → read-only Trash: "Failed to move
+  file to Trash" toast, item and Trash untouched (A5/R5/R7). The Undo
+  button's `win.undo-trash` action was additionally exercised directly
+  (same handler the button activates). Harness note: in the WM-less
+  session a toast's auto-dismiss countdown can stay paused (libadwaita
+  inhibits it on focus/motion enter, and without a WM the matching leave
+  never arrives) — an environment artifact, not app behavior; on a real
+  desktop the countdown runs (and pauses only while hovered, as
+  documented upstream).
 
 ### 2.6 Keyboard & accessibility (docs/08)
 - Full keyboard map verified in GUI: F1 (accel registered), F10 main
