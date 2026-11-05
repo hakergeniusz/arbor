@@ -3,6 +3,10 @@
 # rpmbuild the spec from the release tarball.
 set -euxo pipefail
 tag="$1"
+# libadwaita-devel (current Fedora) with a fallback to the older
+# soname-suffixed name
+dnf install -y --setopt=install_weak_deps=False \
+    rust cargo gtk4-devel libadwaita-devel pkgconf rpm-build || \
 dnf install -y --setopt=install_weak_deps=False \
     rust cargo gtk4-devel libadwaita1-devel pkgconf rpm-build
 

@@ -42,16 +42,9 @@
                     "url": "https://github.com/hakergeniusz/arbor",
                     "tag": "v51.0.0-beta.1",
                     "x-comment": "Pin 'commit' to the tag's hash to protect against tag moves."
-                },
-                {
-                    "type": "archive",
-                    "url": "https://github.com/hakergeniusz/arbor/releases/download/v51.0.0-beta.1/arbor-vendor-51.0.0-beta.1.tar.xz",
-                    "destination": "vendor",
-                    "skip-arches": [],
-                    "disabled": true,
-                    "x-comment": "Offline alternative: publish a vendored cargo registry archive and switch the build-commands to '--offline --frozen' with CARGO_HOME pointed at vendor/. The default build fetches crates.io directly, which flatpak-builder's build sandbox permits."
                 }
             ],
+            "x-vendoring": "Offline alternative: publish a vendored cargo registry archive, add it as a source with a sha256 checksum (flatpak-builder checksum-validates even disabled sources), and switch the build-commands to '--offline --frozen' with CARGO_HOME pointed at vendor/. The default build fetches crates.io directly, which flatpak-builder's build sandbox permits.",
             "x-notes": "The scanner reads arbitrary host paths (filesystem=host) and moves items to the host XDG Trash via gio File::trash; trash confirmation (docs/06) is enforced in-process and cannot be bypassed by the sandbox."
         }
     ]

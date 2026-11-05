@@ -13,7 +13,7 @@ depends=('gtk4>=4.10' 'libadwaita>=1.8')
 makedepends=('cargo')
 source=("$pkgname-$_tag.tar.gz::https://github.com/hakergeniusz/arbor/archive/refs/tags/$_tag.tar.gz")
 sha256sums=('SKIP')  # replace with the tag's checksum at release time
-options=('!lto')
+options=('!lto' '!debug')
 
 build() {
   cd "$pkgname-$_tag"

@@ -8,7 +8,7 @@ ver="${tag#v}"; debver="${ver//-/~}"          # 51.0.0-beta.1 -> 51.0.0~beta.1
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y --no-install-recommends \
-    cargo rustc libgtk-4-dev libadwaita-1-dev pkg-config binutils
+    ca-certificates cargo rustc libgtk-4-dev libadwaita-1-dev pkg-config binutils
 
 mkdir /work && tar xzf "/src/dist/arbor-${tag}.tar.gz" -C /work
 cd "/work/arbor-${tag}"
