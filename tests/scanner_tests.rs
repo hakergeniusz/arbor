@@ -77,6 +77,28 @@ fn ground_truth(path: &Path) -> (u64, u64) {
     }
 }
 
+/// Force delalloc writeback so every file's st_blocks is allocated before
+/// any stat pass (the scanner's or the ground-truth walk's). Two independent
+/// walks of a live ext4 only agree once allocation is flushed: under parallel
+/// test load a background flush between the walks shifted a file's block
+/// count and flaked the size equality (one 4 KiB page, seen in rpmbuild
+/// %check on a loaded machine; btrfs with inline extents never showed it).
+fn settle_fs(dir: &Path) {
+    fn walk(p: &Path) {
+        for e in fs::read_dir(p).unwrap().flatten() {
+            if e.file_type().unwrap().is_dir() {
+                walk(&e.path());
+            } else if let Ok(f) = fs::File::open(e.path()) {
+                let _ = f.sync_all();
+            }
+        }
+        if let Ok(d) = fs::File::open(p) {
+            let _ = d.sync_all();
+        }
+    }
+    walk(dir);
+}
+
 /// The DirMeasured update for `dir` itself.
 fn measured_at<'a>(updates: &'a [ScanUpdate], dir: &Path) -> Option<(u64, u64)> {
     updates.iter().find_map(|u| match u {
@@ -97,6 +119,7 @@ fn nested_tree_totals_match_ground_truth() {
     fs::write(sub.join("c-1MiB.bin"), vec![b'z'; 1024 * 1024]).unwrap();
     let empty = dir.join("empty-dir");
     fs::create_dir_all(&empty).unwrap();
+    settle_fs(&dir);
 
     let updates = collect_updates(&dir);
     let (got_size, got_items) = measured_at(&updates, &dir).expect("root measured");
@@ -143,6 +166,7 @@ fn symlinks_are_excluded_everywhere() {
     let inner = dir.join("inner");
     fs::create_dir_all(&inner).unwrap();
     std::os::unix::fs::symlink("..", inner.join("loop-up")).unwrap();
+    settle_fs(&dir);
 
     let updates = collect_updates(&dir);
     let (got_size, got_items) = measured_at(&updates, &dir).unwrap();
@@ -345,6 +369,7 @@ fn coalesced_stream_replays_to_the_final_tree() {
         }
     }
     all_dirs.push(dir.clone());
+    settle_fs(&dir);
 
     let updates = collect_updates(&dir);
 

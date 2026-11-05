@@ -8,8 +8,9 @@ License:        MIT
 URL:            https://github.com/hakergeniusz/arbor
 Source0:        %{url}/archive/refs/tags/v51.0.0-beta.1.tar.gz
 
-# rust tier-1: covers x86_64 and aarch64
-ExclusiveArch:  %{rust_tier1_arches}
+# rust tier-1: covers x86_64 and aarch64; the macro needs rust-srpm-macros,
+# fall back to the explicit list where it is not installed
+ExclusiveArch:  %{?rust_tier1_arches}%{!?rust_tier1_arches:x86_64 aarch64}
 
 BuildRequires:  rust >= 1.85
 BuildRequires:  cargo
@@ -57,7 +58,7 @@ cargo test --locked
 %{_datadir}/icons/hicolor/scalable/apps/io.github.hakergeniusz.Arbor.svg
 
 %changelog
-* Wed Nov 05 2026 hakergeniusz <hakergeniusz@users.noreply.github.com> - 51.0.0-0.1.beta1
+* Thu Nov 05 2026 hakergeniusz <hakergeniusz@users.noreply.github.com> - 51.0.0-0.1.beta1
 - First public beta (clean-room implementation of the Arbor behavioral
   specification; see docs/ for the specification and provenance).
 * Wed Nov 04 2026 hakergeniusz <hakergeniusz@users.noreply.github.com> - 1.0.0-1

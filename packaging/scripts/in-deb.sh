@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs INSIDE debian:trixie (driven by build-deb.sh, /src read-only repo
+# Runs INSIDE ubuntu:25.10 (driven by build-deb.sh, /src read-only repo
 # checkout, /out artifact dir): install build deps, compile the release
 # binary, stage the package tree and build the .deb with dpkg-deb.
 set -euxo pipefail
@@ -19,6 +19,7 @@ cd "/work/arbor-${tag}"
 cargo build --release --locked
 
 stage=/pkg/debian/arbor
+mkdir -p "$stage/DEBIAN"
 install -D -s -m 755 target/release/arbor "$stage/usr/bin/arbor"
 install -D -m 644 data/io.github.hakergeniusz.Arbor.desktop.in \
     "$stage/usr/share/applications/io.github.hakergeniusz.Arbor.desktop"
