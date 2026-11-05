@@ -20,6 +20,12 @@ pub struct LaidRect {
 /// Squarified layout of `weights` into the rectangle `(x, y, w, h)`.
 /// Weights must be non-negative and sum > 0; zero-weight items receive
 /// sliver rectangles at the end.
+///
+/// Row quality per Bruls et al.: an item of area `a` in a row of total area
+/// `A` laid along an edge of length `L` has aspect
+/// `max(a·L²/A², A²/(a·L²))` — the row total matters (a per-item `L²/a`
+/// test never breaks a row of equal weights and collapses the layout into
+/// full-width strips).
 pub fn squarify(weights: &[f64], x: f64, y: f64, w: f64, h: f64) -> Vec<LaidRect> {
     let total: f64 = weights.iter().sum();
     let area = w * h;
@@ -42,18 +48,31 @@ pub fn squarify(weights: &[f64], x: f64, y: f64, w: f64, h: f64) -> Vec<LaidRect
         // The row strip runs along the SHORTER edge of the remaining
         // rectangle (its length is min(w, h)).
         let long = remaining.2.min(remaining.3);
+        let long2 = long * long;
         let mut row: Vec<usize> = vec![order[i]];
         let mut row_areas: Vec<f64> = vec![weights[order[i]] * scale];
+        let mut row_total = row_areas[0];
+        let mut row_worst = row_item_worst(&row_areas, row_total, long2);
         i += 1;
         while i < order.len() {
             let candidate = weights[order[i]] * scale;
             // Adding the candidate improves (or keeps) the worst aspect ratio
             // in the row → grow the row; otherwise lay the row out.
-            let mut with_candidate = row_areas.clone();
-            with_candidate.push(candidate);
-            if worst_ratio(&row_areas, long) >= worst_ratio(&with_candidate, long) {
+            let with_total = row_total + candidate;
+            let with_worst = {
+                let mut worst = row_item_worst(&row_areas, with_total, long2);
+                let r = (candidate * long2 / (with_total * with_total))
+                    .max(with_total * with_total / (candidate * long2));
+                if candidate > 0.0 && r > worst {
+                    worst = r;
+                }
+                worst
+            };
+            if row_worst >= with_worst {
                 row.push(order[i]);
                 row_areas.push(candidate);
+                row_total = with_total;
+                row_worst = with_worst;
                 i += 1;
             } else {
                 break;
@@ -118,17 +137,18 @@ pub fn squarify(weights: &[f64], x: f64, y: f64, w: f64, h: f64) -> Vec<LaidRect
     out
 }
 
-/// Worst aspect ratio of the items in a row strip laid along an edge of
-/// length `long` (item thickness = area / long, ratio = max(long²/a, a/long²)).
-fn worst_ratio(areas: &[f64], long: f64) -> f64 {
-    if long <= 0.0 || areas.is_empty() {
+/// Worst aspect ratio among the items of a row with total `row_total`, laid
+/// along an edge of length `√long2` (Bruls: item extent along the strip is
+/// `a·L/row_total`, thickness `row_total/L`).
+fn row_item_worst(areas: &[f64], row_total: f64, long2: f64) -> f64 {
+    if long2 <= 0.0 || areas.is_empty() || row_total <= 0.0 {
         return f64::INFINITY;
     }
-    let long2 = long * long;
+    let a2 = row_total * row_total;
     areas
         .iter()
         .filter(|a| **a > 0.0)
-        .map(|a| (long2 / a).max(a / long2))
+        .map(|a| (a * long2 / a2).max(a2 / (a * long2)))
         .fold(0.0f64, f64::max)
 }
 
@@ -198,5 +218,40 @@ mod tests {
         let last = segs.last().unwrap();
         assert!((last.start + last.span - 360.0).abs() < 1e-9);
         assert!((segs[1].span - 180.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn equal_weights_break_into_a_grid_not_one_strip() {
+        // Regression: a per-item worst-ratio test (row total ignored) never
+        // broke a row of equal weights — 20 equal dirs rendered as ~20
+        // full-width strips. The row-total rule must produce a grid of
+        // reasonably square tiles.
+        let weights = [1.0; 20];
+        let rects = squarify(&weights, 0.0, 0.0, 458.0, 462.0);
+        assert_eq!(rects.len(), 20);
+        for r in &rects {
+            let aspect = r.w.max(r.h) / r.w.min(r.h);
+            assert!(aspect < 3.0, "tile {}x{} too elongated", r.w, r.h);
+        }
+        // More than one row (measured along both axes).
+        let distinct_x: std::collections::HashSet<u32> =
+            rects.iter().map(|r| (r.x * 2.0).round() as u32).collect();
+        let distinct_y: std::collections::HashSet<u32> =
+            rects.iter().map(|r| (r.y * 2.0).round() as u32).collect();
+        assert!(distinct_x.len() > 2 && distinct_y.len() > 2,
+            "layout collapsed to strips: {} x-positions, {} y-positions",
+            distinct_x.len(), distinct_y.len());
+    }
+
+    #[test]
+    fn dominant_item_gets_its_own_row() {
+        // One huge + many tiny: the huge item fills one strip, the tiny ones
+        // pack the remainder — the classic squarified shape.
+        let mut weights = vec![1000.0];
+        weights.extend(std::iter::repeat_n(1.0, 30));
+        let rects = squarify(&weights, 0.0, 0.0, 400.0, 400.0);
+        assert_eq!(rects.len(), 31);
+        let big = &rects[0];
+        assert!(big.w > 390.0 && big.h > 300.0, "dominant tile {}x{}", big.w, big.h);
     }
 }

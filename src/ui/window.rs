@@ -86,6 +86,14 @@ struct WindowState {
     /// Last chart update — charts clone the visible subtree, so while
     /// scanning they refresh at most 2×/s.
     last_chart: Cell<std::time::Instant>,
+    /// Bumped on every tree mutation (scan merges, measured aggregates,
+    /// trash detach) — invalidates the chart projection caches.
+    tree_gen: u64,
+    /// Cached rings projection of `current_folder`: (tree_gen, folder, node).
+    /// Selection changes reuse it; only tree edits or navigation re-project.
+    rings_cache: Option<(u64, PathBuf, Rc<ChartNode>)>,
+    /// Cached treemap projection of the treemap source folder.
+    treemap_cache: Option<(u64, PathBuf, Rc<ChartNode>)>,
 }
 
 impl ArborUi {
@@ -199,6 +207,9 @@ impl ArborUi {
                 select_largest: false,
                 last_repaint: Cell::new(std::time::Instant::now()),
                 last_chart: Cell::new(std::time::Instant::now()),
+                tree_gen: 0,
+                rings_cache: None,
+                treemap_cache: None,
             }),
             item_popover: RefCell::new(None),
         });
@@ -208,6 +219,7 @@ impl ArborUi {
             window.set_default_size(size.width.max(400), size.height.max(300));
         }
         ui.start_page.rebuild(&ui.settings);
+        ui.apply_chart_visibility();
 
         window.present();
         ui
@@ -308,6 +320,22 @@ impl ArborUi {
             });
         }
         self.window.add_action(&toggle_expand);
+
+        // ^ on the pinned location row: navigate to the parent folder
+        // (docs/02 §3). No-op at the scan root (no parent inside the scan).
+        let navigate_up = gio::SimpleAction::new("navigate-up", None);
+        {
+            let ui = self.clone();
+            navigate_up.connect_activate(move |_, _| {
+                let current = ui.state.borrow().current_folder.clone();
+                if let Some(parent) = current.parent() {
+                    if parent != Path::new("") {
+                        ui.navigate_within_scan(parent);
+                    }
+                }
+            });
+        }
+        self.window.add_action(&navigate_up);
 
         // Treemap interactions (docs/04 §8): click selects the matching row
         // (falling back to the nearest visible ancestor when the hit item is
@@ -428,6 +456,12 @@ impl ArborUi {
             let ui = self.clone();
             let action = gio::SimpleAction::new("item-menu", None);
             action.connect_activate(move |_, _| {
+                // Only meaningful in a result view: on the start page there is
+                // no item row (a stale selection from a previous scan must not
+                // resurrect the menu there).
+                if ui.current_location().is_none() {
+                    return;
+                }
                 let Some(row) = ui.result_view.selected_row() else { return };
                 let path = row.path().to_string();
                 // Anchor at the focused row cell when the focus is inside
@@ -566,6 +600,9 @@ impl ArborUi {
             state.known.clear();
             state.expanded.clear();
             state.pending_autoselect = true;
+            // Fresh tree — stale projections from the previous scan are gone.
+            state.rings_cache = None;
+            state.treemap_cache = None;
         }
 
         // Header state (docs/01 §3): Back + Rescan appear, the Main Menu
@@ -701,7 +738,7 @@ impl ArborUi {
                     }
                     // Merge entries under their own parents (shared with the
                     // protocol tests).
-                    let WindowState { tree, known, rows_dirty, .. } = &mut *state;
+                    let WindowState { tree, known, rows_dirty, tree_gen, .. } = &mut *state;
                     tree.as_mut()
                         .expect("tree was just created")
                         .merge_entries(&entries, known);
@@ -709,12 +746,14 @@ impl ArborUi {
                     // a home-folder scan would otherwise rebuild O(rows) per
                     // directory and O(subtree) for the charts.
                     *rows_dirty = true;
+                    *tree_gen += 1;
                 }
             }
             ScanUpdate::DirMeasured { path, size, items, error, mtime } => {
                 let mut state = self.state.borrow_mut();
                 let Some(tree) = &mut state.tree else { return };
                 tree.apply_measured(&path, size, items, error, mtime);
+                state.tree_gen += 1;
                 let is_current = state.current_folder == path;
                 if is_current && state.pending_autoselect {
                     state.select_largest = true;
@@ -834,40 +873,94 @@ impl ArborUi {
 
     /// Rebuild the shared chart state from the tree + selection and push it
     /// to both charts (docs/04 §7–§8).
+    ///
+    /// The subtree projections are cached against a tree-generation counter:
+    /// selecting rows (the most frequent trigger — every click fires the
+    /// selection-changed signal) reuses them; only tree edits or navigation
+    /// into a different folder re-project. With the chart pane disabled in
+    /// Preferences this returns immediately — no projection, no redraws.
     fn update_charts(&self) {
-        let state = self.state.borrow();
-        let Some(tree) = &state.tree else { return };
-        let Some(root) = state.current.as_ref().and_then(|p| tree.find(p)) else {
+        if !self.result_view.charts_visible() {
             return;
+        }
+        let (tree_gen, current_folder, treemap_src_path, selected_path) = {
+            let state = self.state.borrow();
+            let Some(tree) = &state.tree else { return };
+            let Some(current) = tree.find(&state.current_folder) else { return };
+
+            // The location row counts as "current folder", not a selection.
+            let selected_path = self
+                .result_view
+                .selected_row()
+                .map(|r| r.path().to_string())
+                .filter(|p| p != &current.path.display().to_string());
+
+            // Treemap follows the selection: the selected folder's subtree, the
+            // current folder for a selected file (it stays highlighted inside it),
+            // or the current folder when nothing is selected (docs/04 §8).
+            let treemap_src = selected_path
+                .as_deref()
+                .and_then(|p| tree.find(Path::new(p)))
+                .filter(|n| n.is_dir)
+                .unwrap_or(current);
+
+            (
+                state.tree_gen,
+                state.current_folder.clone(),
+                treemap_src.path.clone(),
+                selected_path,
+            )
         };
-        let Some(current) = tree.find(&state.current_folder) else { return };
 
-        let root_children = sorted_root_children(root);
-
-        // The location row counts as "current folder", not a selection.
-        let selected_path = self
-            .result_view
-            .selected_row()
-            .map(|r| r.path().to_string())
-            .filter(|p| p != &current.path.display().to_string());
-
-        // Treemap follows the selection: the selected folder's subtree, the
-        // current folder for a selected file (it stays highlighted inside it),
-        // or the current folder when nothing is selected (docs/04 §8).
-        let treemap_src = selected_path
-            .as_deref()
-            .and_then(|p| tree.find(Path::new(p)))
-            .filter(|n| n.is_dir)
-            .unwrap_or(current);
+        let rings_root = self.chart_projection(tree_gen, &current_folder, true);
+        let treemap_root = self.chart_projection(tree_gen, &treemap_src_path, false);
 
         let chart_state = Rc::new(ChartState {
-            rings_root: to_chart_node(current, root, &root_children),
-            treemap_root: to_chart_node(treemap_src, root, &root_children),
+            rings_root,
+            treemap_root,
             selected_path,
         });
-        drop(state);
         self.result_view.rings_chart.set_state(Some(chart_state.clone()));
         self.result_view.treemap_chart.set_state(Some(chart_state));
+    }
+
+    /// The cached projection of `folder` (rings or treemap source), rebuilt
+    /// only when the tree generation or the folder changed since.
+    fn chart_projection(&self, tree_gen: u64, folder: &Path, rings: bool) -> Rc<ChartNode> {
+        {
+            let state = self.state.borrow();
+            let cache = if rings { &state.rings_cache } else { &state.treemap_cache };
+            if let Some((g, p, node)) = cache {
+                if *g == tree_gen && p.as_path() == folder {
+                    return node.clone();
+                }
+            }
+        }
+        let projected = {
+            let state = self.state.borrow();
+            let Some(tree) = &state.tree else {
+                return empty_projection(folder);
+            };
+            let Some(node) = tree.find(folder) else {
+                return empty_projection(folder);
+            };
+            let Some(root_path) = state.current.clone() else {
+                return empty_projection(folder);
+            };
+            let index = tree
+                .find(&root_path)
+                .map(|root| crate::ui::palette::ColorIndex::new(&sorted_root_children(root)));
+            let mut color_cache: std::collections::HashMap<(usize, u32), String> =
+                std::collections::HashMap::new();
+            project_chart(node, &root_path, index.as_ref(), &mut color_cache, 0)
+        };
+        let projected = Rc::new(projected);
+        {
+            let mut state = self.state.borrow_mut();
+            let slot = if rings { &mut state.rings_cache } else { &mut state.treemap_cache };
+            *slot = Some((tree_gen, folder.to_path_buf(), projected.clone()));
+        }
+        projected
     }
 
     fn show_chart_page(&self) {
@@ -1055,6 +1148,7 @@ impl ArborUi {
             if let Some(tree) = state.tree.as_mut() {
                 tree.detach(path);
             }
+            state.tree_gen += 1; // the projections no longer match the tree
             state.undo = Some(record);
         }
         // R8: row removed and totals recomputed immediately (optimistic —
@@ -1105,6 +1199,18 @@ impl ArborUi {
     pub fn refresh_start_page(&self) {
         self.start_page.rebuild(&self.settings);
         save_settings(&self.settings.borrow());
+    }
+
+    /// Apply the Preferences "Show chart" switch: hide/show the chart pane
+    /// and let the result view pick the change up immediately. When the pane
+    /// comes back mid-result, force one repaint so the charts project.
+    pub fn apply_chart_visibility(self: &Rc<Self>) {
+        let on = self.settings.borrow().show_chart;
+        self.result_view.set_chart_enabled(on);
+        if on && self.current_location().is_some() && self.state.borrow().scan.is_none() {
+            self.show_chart_page();
+            self.repaint_rows(true);
+        }
     }
 }
 
@@ -1215,26 +1321,72 @@ fn sorted_root_children(root: &DisplayNode) -> Vec<PathBuf> {
     v
 }
 
-/// Snapshot a `DisplayNode` subtree into a colored `ChartNode`.
-fn to_chart_node(node: &DisplayNode, root: &DisplayNode, root_children: &[PathBuf]) -> ChartNode {
+/// Snapshot a `DisplayNode` subtree into a colored `ChartNode` — depth-capped
+/// at `CHART_MAX_DEPTH` (deeper nodes are never drawn), with children's
+/// angular segments precomputed and colors interned per (hue index, depth).
+fn project_chart(
+    node: &DisplayNode,
+    root_path: &Path,
+    index: Option<&crate::ui::palette::ColorIndex>,
+    color_cache: &mut std::collections::HashMap<(usize, u32), String>,
+    depth: usize,
+) -> ChartNode {
     let color = if node.error {
         crate::ui::palette::ERROR_COLOR.to_string()
+    } else if node.path == root_path {
+        String::new() // the scan root itself: neutral
     } else {
-        crate::ui::palette::color_for(&node.path, &root.path, root_children)
+        match index.and_then(|i| i.top_index_of(&node.path, root_path)) {
+            None => String::new(),
+            Some(idx) => {
+                let rel_depth = crate::ui::palette::ColorIndex::rel_depth(&node.path, root_path) as u32;
+                color_cache
+                    .entry((idx, rel_depth))
+                    .or_insert_with(|| crate::ui::palette::color_for_indexed(idx, f64::from(rel_depth)))
+                    .clone()
+            }
+        }
     };
-    let mut children: Vec<&DisplayNode> = node.children.iter().collect();
-    children.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    let (children, segs) = if depth >= super::charts::CHART_MAX_DEPTH || node.children.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        // Chart children render name-sorted (stable palette order, docs/10 §5).
+        let mut ordered: Vec<(&DisplayNode, String)> = node
+            .children
+            .iter()
+            .map(|c| (c, c.name.to_lowercase()))
+            .collect();
+        ordered.sort_by(|a, b| a.1.cmp(&b.1));
+        let children: Vec<ChartNode> = ordered
+            .into_iter()
+            .map(|(c, _)| project_chart(c, root_path, index, color_cache, depth + 1))
+            .collect();
+        let weights: Vec<f64> = children.iter().map(|c| c.size as f64).collect();
+        let segs = crate::squarify::segments(&weights);
+        (children, segs)
+    };
     ChartNode {
         name: node.name.clone(),
         size: node.size,
         color,
         is_dir: node.is_dir,
         path: node.path.display().to_string(),
-        children: children
-            .iter()
-            .map(|c| to_chart_node(c, root, root_children))
-            .collect(),
+        children,
+        segs,
     }
+}
+
+/// Neutral empty chart node for degenerate lookups (folder not in the tree).
+fn empty_projection(folder: &Path) -> Rc<ChartNode> {
+    Rc::new(ChartNode {
+        name: String::new(),
+        size: 0,
+        color: String::new(),
+        is_dir: true,
+        path: folder.display().to_string(),
+        children: Vec::new(),
+        segs: Vec::new(),
+    })
 }
 
 fn load_settings() -> Settings {
@@ -1243,7 +1395,7 @@ fn load_settings() -> Settings {
         .unwrap_or_default()
 }
 
-fn save_settings(s: &Settings) {
+pub(crate) fn save_settings(s: &Settings) {
     if let Some(path) = Settings::default_path() {
         if let Err(err) = s.save_to(&path) {
             eprintln!("arbor: failed to persist settings: {err}");

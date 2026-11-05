@@ -5,7 +5,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::Align;
 
-use crate::ui::window::ArborUi;
+use crate::ui::window::{save_settings, ArborUi};
 
 /// Present the Preferences dialog over the main window.
 pub fn present(ui: &Rc<ArborUi>) {
@@ -13,11 +13,38 @@ pub fn present(ui: &Rc<ArborUi>) {
     prefs.set_title("Preferences");
     prefs.set_search_enabled(false);
 
+    let page = adw::PreferencesPage::new();
+
+    // Chart pane visibility (user request beyond the spec: the rings and
+    // treemap redraws stall the UI on multi-million-entry trees, so the
+    // pane can be disabled entirely; persists in the state file).
+    let chart_group = adw::PreferencesGroup::builder()
+        .title("Chart")
+        .build();
+    let show_chart = adw::SwitchRow::builder()
+        .title("Show chart")
+        .subtitle("Display the rings and treemap pane beside the item list")
+        .active(ui.settings.borrow().show_chart)
+        .build();
+    {
+        let ui = ui.clone();
+        let row = show_chart.clone();
+        show_chart.connect_active_notify(move |_| {
+            let on = row.is_active();
+            if ui.settings.borrow().show_chart != on {
+                ui.settings.borrow_mut().show_chart = on;
+                save_settings(&ui.settings.borrow());
+                ui.apply_chart_visibility();
+            }
+        });
+    }
+    chart_group.add(&show_chart);
+    page.add(&chart_group);
+
     let group = adw::PreferencesGroup::builder()
         .title("Locations to Ignore")
         .description("Ignored locations are excluded from scans.")
         .build();
-    let page = adw::PreferencesPage::new();
     page.add(&group);
     prefs.add(&page);
 

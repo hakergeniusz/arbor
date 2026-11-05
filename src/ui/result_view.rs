@@ -4,7 +4,7 @@
 // The context-menu wiring lands with the item-actions phase.
 #![allow(dead_code)]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gtk::gio;
@@ -25,12 +25,16 @@ pub struct ResultView {
     pub column_view: gtk::ColumnView,
     pub store: gio::ListStore,
     pub selection: gtk::SingleSelection,
+    chart_area: gtk::Box,
     pub chart_stack: gtk::Stack,
     pub spinner: gtk::Spinner,
     pub toggle_rings: gtk::ToggleButton,
     pub toggle_treemap: gtk::ToggleButton,
     pub rings_chart: RingsChart,
     pub treemap_chart: TreemapChart,
+    /// The chart pane can be disabled in Preferences ("Show chart"); when
+    /// off, the list takes the full width and no chart work happens.
+    charts_enabled: Cell<bool>,
     row_context_cb: Rc<RefCell<Option<RowContextCb>>>,
 }
 
@@ -138,12 +142,14 @@ impl ResultView {
             column_view,
             store,
             selection,
+            chart_area,
             chart_stack,
             spinner,
             toggle_rings,
             toggle_treemap,
             rings_chart,
             treemap_chart,
+            charts_enabled: Cell::new(true),
             row_context_cb,
         }
     }
@@ -167,10 +173,22 @@ impl ResultView {
         }
     }
 
-    /// True while a chart page (not the scanning spinner) is frontmost —
-    /// the chart projection is skipped while charts are covered.
+    /// True while a chart page (not the scanning spinner) is frontmost AND
+    /// the pane is enabled — the chart projection is skipped otherwise.
     pub fn charts_visible(&self) -> bool {
-        self.chart_stack.visible_child_name().as_deref() != Some("spinner")
+        self.charts_enabled.get()
+            && self.chart_stack.visible_child_name().as_deref() != Some("spinner")
+    }
+
+    /// Show/hide the chart pane (Preferences "Show chart"). Hidden, the item
+    /// list takes the whole width; the toggles hide with the pane.
+    pub fn set_chart_enabled(&self, on: bool) {
+        self.charts_enabled.set(on);
+        self.chart_area.set_visible(on);
+    }
+
+    pub fn charts_enabled(&self) -> bool {
+        self.charts_enabled.get()
     }
 
     /// Reflect `mode` in the toggle buttons. Signal handlers live in the
@@ -234,6 +252,22 @@ fn folder_factory(row_context_cb: Rc<RefCell<Option<RowContextCb>>>) -> gtk::Sig
         arrow.set_pixel_size(12);
         expander.set_child(Some(&arrow));
         expander.set_valign(Align::Center);
+        // ▶/▼ toggles inline expansion; the pinned location row's ^ navigates
+        // to the parent folder (docs/02 §3). The row object is read at click
+        // time — the button widget is recycled across items.
+        {
+            let item = list_item.clone();
+            let expander_btn = expander.clone();
+            expander.connect_clicked(move |_| {
+                let Some(row) = item.item().and_downcast::<ScanRow>() else { return };
+                if row.is_location() {
+                    expander_btn.activate_action("win.navigate-up", None);
+                } else {
+                    let param = row.path().to_variant();
+                    expander_btn.activate_action("win.toggle-expand", Some(&param));
+                }
+            });
+        }
 
         // Percent badge: one dark pill whose fill represents the share with
         // the percentage centered on top (docs/10 §3 row anatomy).

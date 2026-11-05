@@ -16,5 +16,8 @@ pub fn present(parent: &impl gtk::prelude::IsA<gtk::Widget>) {
         .website("https://github.com/hakergeniusz/arbor")
         .issue_url("https://github.com/hakergeniusz/arbor/issues")
         .build();
+    // The spec's About carries a Credits sub-page (docs/01 §8); libadwaita
+    // only shows the row when a credit section exists.
+    about.add_credit_section(Some("Implementation"), &["Team B — independent clean-room implementation"]);
     about.present(Some(parent));
 }

@@ -5,6 +5,7 @@
 // Consumed by the charts and list coloring.
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::path::Path;
 
 /// CSS color for a list name / chart segment.
@@ -22,6 +23,46 @@ pub fn color_for(path: &Path, root: &Path, root_children: &[std::path::PathBuf])
         return String::new();
     };
     let depth = rel.components().count() as f64;
+    color_for_indexed(idx, depth)
+}
+
+/// O(1) hue lookup for chart projections: the same stable index space as
+/// `color_for`, but the root child → index mapping is built once instead of
+/// searched linearly per projected node.
+pub struct ColorIndex {
+    map: HashMap<std::path::PathBuf, usize>,
+}
+
+impl ColorIndex {
+    pub fn new(root_children: &[std::path::PathBuf]) -> Self {
+        ColorIndex {
+            map: root_children
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (p.clone(), i))
+                .collect(),
+        }
+    }
+
+    /// The palette index of `path`'s top-level ancestor, or None when `path`
+    /// is the scan root itself (neutral) or escapes it.
+    pub fn top_index_of(&self, path: &Path, root: &Path) -> Option<usize> {
+        let rel = path.strip_prefix(root).ok()?;
+        let top = rel.components().next()?;
+        self.map.get(&root.join(top)).copied()
+    }
+
+    /// Number of components of `path` below `root` (its color depth).
+    pub fn rel_depth(path: &Path, root: &Path) -> usize {
+        path.strip_prefix(root)
+            .map(|rel| rel.components().count())
+            .unwrap_or(0)
+    }
+}
+
+/// Hue for the root child at stable index `idx`, `depth` components below
+/// the scan root (shared by `color_for` and the chart projection).
+pub fn color_for_indexed(idx: usize, depth: f64) -> String {
     // Golden-angle hue distribution keeps neighbors distinguishable.
     let hue = (idx as f64 * 137.508) % 360.0;
     // Descendants stay in the family: lighten/darken with depth.

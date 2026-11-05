@@ -5,11 +5,11 @@ as an independent Rust/GTK4 application. This report distinguishes what is
 **implemented and tested**, what is **implemented but not fully verified**,
 and what is **not done** — no claims beyond that.
 
-- Head: `a08c2be` (branch `implementer/arbor`, pushed to
+- Head: this commit (branch `implementer/arbor`, pushed to
   https://github.com/hakergeniusz/arbor — private), version 1.0.0
-- Test suite: **29 tests, 0 failures** (16 unit + 13 scanner-integration)
-- GUI evidence: ~100 screenshots from the hermetic Xvfb session
-  (`/tmp/arbor-gui/shots/01…106`, referenced below as S###/A#–A# from
+- Test suite: **34 tests, 0 failures** (21 unit + 13 scanner-integration)
+- GUI evidence: ~160 screenshots from the hermetic Xvfb session
+  (`/tmp/arbor-gui/shots/01…189`, referenced below as S###/A#–A# from
   `docs/09-test-scenarios.md`)
 - Clean-room rules honored throughout: no Baobab source, no `tools/`
   inspection/execution, `/usr/bin/baobab` never launched.
@@ -83,6 +83,20 @@ and what is **not done** — no claims beyond that.
   opens the item menu; correct squarified orientation at real-home scale
   (shot 105).
 - Chart switcher buttons (Rings/Treemap) with correct active styling.
+- **Chart pane can be disabled** (user request beyond the spec):
+  Preferences → "Show chart" (persisted, default on) hides the whole right
+  pane — list takes the full width, no projection or redraws happen — and
+  re-enabling restores it live, mid-result (shots 143–146).
+- **Large-scan chart performance** (third review round): per-node ring
+  segment caches, sub-pixel arc pruning, hover repaints only when the
+  hovered *segment* changes (binary-search hit-test), treemap layout cached
+  against (root, size) with flat rect data instead of subtree clones,
+  depth-capped projection, projection cache keyed on a tree-generation
+  counter (row selection no longer re-projects anything), O(1) palette
+  lookup with interned colors. On a 160k-entry fixture the UI stays at
+  ~0.1 s AT-SPI round-trips through navigation, selection, chart hovers and
+  treemap interaction (shots 134–142); the same view used to stall per
+  mouse-move.
 
 ### 2.4 Actions (docs/05)
 - Context menu (Open Externally / Copy Path to Clipboard / Move to
@@ -152,10 +166,40 @@ Full **A1–A8 acceptance matrix** on self-created fixtures:
 
 ### 2.8 Dialogs
 All opened and screenshot-verified in the hermetic session: Preferences
-("Locations to Ignore" + Add Location), Keyboard Shortcuts (General +
-Scanning groups matching docs/08 §2), About (logo, developer, version,
-Website/Report an Issue/Legal), Scan Folder chooser (with "Recursively
-analyze mount points" checkbox, S09).
+("Chart — Show chart" switch + "Locations to Ignore" + Add Location),
+Keyboard Shortcuts (General + Scanning groups matching docs/08 §2), About
+(logo, developer, version badge with click-to-copy toast, Website/Report an
+Issue/Credits/Legal), Scan Folder chooser (with "Recursively analyze mount
+points" checkbox, S09).
+
+### 2.9 Third real-desktop review round (2026-11-05, shots 132–189)
+User: the UI is "clearly weird" and "the graph on right … causes immense
+lag" — test all UI elements. A full control sweep in the hermetic Xvfb
+session (start page incl. pixel-level usage-bar measurement, main menu,
+Preferences, Keyboard Shortcuts, About incl. the version-badge clipboard
+toast, chooser, result-view sorting/breadcrumb/expander/up-arrow, chart
+toggles and both charts at fixture scale, context menus on rows and treemap
+tiles, keyboard map, resize, Clear Recent List, Ctrl+Q, plus the full trash
+A-cycle re-run) found and fixed four real defects:
+- **Treemap collapsed into full-width strips**: the squarified worst-ratio
+  test ignored the row total (Bruls needs `max(a·L²/A², A²/(a·L²))`), so
+  rows of equal weights never broke. Now a proper grid (pinned by
+  `equal_weights_break_into_a_grid_not_one_strip`,
+  `dominant_item_gets_its_own_row`; shots 141 → 142).
+- **Dead expander arrows**: the row ▶/▼ buttons had no click handler at all
+  and `win.toggle-expand` had no activator — nothing expanded, and the
+  location row's `^` did not navigate. Both wired now; `^` navigates to the
+  parent via the new `win.navigate-up` (docs/02 §3, S13b/S15; shots
+  149–150 vs 148).
+- **Keyboard item menu on the start page**: Shift+F10/Menu with a stale
+  selection from a previous scan resurrected the item menu outside any
+  result view; the action now no-ops there (docs/08 §4.2; shots 183 vs
+  184/185).
+- **Missing About Credits row** (docs/01 §8) — added a credit section.
+The usage-bar suspicion from the user's screenshot was measured and
+**cleared**: fill = 413/526 px = 78.5% for a 78.7%-used disk — the bar, its
+label and the spec all agree; the start page matches the reference
+structure exactly (docs/01 §1–2, docs/10 state 7).
 
 ## 3. Implemented, partially verified
 
@@ -189,6 +233,12 @@ existing window navigates, S06).
   the *plan* (not the spec): `fsops.rs` folded into `trash.rs` + UI
   actions; `treemap.rs` merged into `ui/charts.rs`; `ui/confirm.rs` added
   for the mandatory dialog; `libc` is a regular dependency (`geteuid`).
+- **Chart pane optional** (user request beyond the spec): Preferences
+  "Show chart" (default on, persisted) hides the rings/treemap pane; when
+  off, the result view is the full-width list per the same anatomy.
+- About identity: the dialog and menu say **Arbor** (clean-room app,
+  developer hakergeniusz) rather than the reference's GNOME branding —
+  same row structure as docs/01 §8.
 - One deliberate deviation from the *spec text* (docs/10 §5 "List name
   colors match segment colors"): names render plain, matching the
   observed reference application itself (user-supplied real screenshot,

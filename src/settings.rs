@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// Everything Arbor persists between runs.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
     /// Recently scanned folders, newest first (docs/01 §2).
     #[serde(default)]
@@ -25,9 +25,31 @@ pub struct Settings {
     /// "Recursively analyze mount points" checkbox (docs/03 §1, decision D1).
     #[serde(default)]
     pub recursive_mounts: bool,
+    /// Show the chart pane (rings/treemap) beside the item list. User request
+    /// beyond the spec: the chart can be disabled in Preferences because
+    /// projecting/drawing it stalls the UI on multi-million-entry trees.
+    /// Defaults to on; a missing field in an older state file keeps it on.
+    #[serde(default = "default_true")]
+    pub show_chart: bool,
     /// Remembered window size; None → 960×600 default (docs/01 §1, D3).
     #[serde(default)]
     pub window_size: Option<WindowSize>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            recents: Vec::new(),
+            ignored: Vec::new(),
+            recursive_mounts: false,
+            show_chart: true,
+            window_size: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,10 +149,19 @@ mod tests {
         let mut s = Settings::default();
         s.push_recent("/some/dir");
         s.recursive_mounts = true;
+        s.show_chart = false;
         s.window_size = Some(WindowSize { width: 800, height: 600 });
         s.save_to(&path).unwrap();
         let loaded = Settings::load_from(&path);
         assert_eq!(s, loaded);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn show_chart_defaults_on_and_survives_old_state_files() {
+        // Absent field (older state.json) → charts stay enabled.
+        let s: Settings = serde_json::from_str("{}").unwrap();
+        assert!(s.show_chart);
+        assert_eq!(Settings::default().show_chart, true);
     }
 }
