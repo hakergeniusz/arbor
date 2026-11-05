@@ -9,7 +9,7 @@ and what is **not done** — no claims beyond that.
   https://github.com/hakergeniusz/arbor — private), version 1.0.0
 - Test suite: **38 tests, 0 failures** (24 unit + 14 scanner-integration)
 - GUI evidence: ~200 screenshots from the hermetic Xvfb session
-  (`/tmp/arbor-gui/shots/01…206`, referenced below as S###/A#–A# from
+  (`/tmp/arbor-gui/shots/01…214`, referenced below as S###/A#–A# from
   `docs/09-test-scenarios.md`)
 - Clean-room rules honored throughout: no Baobab source, no `tools/`
   inspection/execution, `/usr/bin/baobab` never launched.
@@ -245,6 +245,26 @@ cleaned on the next launch (shot 207). (2) The treemap's per-level
 groups ("gaps are too big") — insets halved to 1.5 px and strokes to
 1 px, tiles now separate by ~2–3 px hairlines (shot 209 vs the user's
 screenshot).
+
+### 2.11 Fifth round (2026-11-05, shots 210–214): disc glyphs and list density
+Both items of the user's "neither were done" report, this time with
+numeric pixel evidence instead of eyeballed crops:
+- **Disc icons now sit centered in their circles.** Root cause found in
+  two layers: (a) the disc was a GtkBox, which start-packs a
+  non-expanding child — the 18px glyph kept an 18px allocation pinned
+  to the box origin, where halign Center is a no-op; (b) the first fix
+  attempt (Overlay) was never actually linked into the tested binary
+  (a 0.04 s "Finished" no-op build), which is why two rounds rendered
+  identically. The disc is now a GtkOverlay carrying the circle as its
+  own background with the glyph as an *overlay* child, which
+  libadwaita positions strictly by halign/valign. Pixel measurement
+  across all six start-page rows: glyph center == circle center,
+  dx=0.0/dy=0.0, discs exactly 40×40 (shot 212 + zoom crop).
+- **Denser result-list rows.** Measured folder-list row pitch was
+  50 px, driven by theme min-heights and expander-button padding.
+  Columnview rows and the row-expander buttons now have zero
+  min-height/vertical padding; pitch is uniformly 34 px (−32 %,
+  shot 214 vs shot 200, same measurement script on both).
 
 ## 3. Implemented, partially verified
 
