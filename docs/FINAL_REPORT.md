@@ -5,11 +5,12 @@ as an independent Rust/GTK4 application. This report distinguishes what is
 **implemented and tested**, what is **implemented but not fully verified**,
 and what is **not done** — no claims beyond that.
 
-- Head: this commit (branch `implementer/arbor`, pushed to
-  https://github.com/hakergeniusz/arbor — private), version 1.0.0
+- Head: this commit (default branch `main`, pushed to
+  https://github.com/hakergeniusz/arbor — private), version 51.0.0-beta.1,
+  first release: https://github.com/hakergeniusz/arbor/releases/tag/v51.0.0-beta.1
 - Test suite: **38 tests, 0 failures** (24 unit + 14 scanner-integration)
 - GUI evidence: ~200 screenshots from the hermetic Xvfb session
-  (`/tmp/arbor-gui/shots/01…214`, referenced below as S###/A#–A# from
+  (`/tmp/arbor-gui/shots/01…218`, referenced below as S###/A#–A# from
   `docs/09-test-scenarios.md`)
 - Clean-room rules honored throughout: no Baobab source, no `tools/`
   inspection/execution, `/usr/bin/baobab` never launched.
@@ -266,6 +267,32 @@ numeric pixel evidence instead of eyeballed crops:
   min-height/vertical padding; pitch is uniformly 34 px (−32 %,
   shot 214 vs shot 200, same measurement script on both).
 
+### 2.12 Release 51.0.0-beta.1 (2026-11-05, shots 215–218)
+Default branch switched to `main`; tag `v51.0.0-beta.1`; GitHub
+pre-release with five artifacts, all built by committed scripts
+(`packaging/scripts/`):
+- **Arch** `.pkg.tar.zst` (makepkg from the tag tarball) — contents
+  verified via `pacman -Qlp`, and the packaged binary was run from an
+  extracted staged root in the Xvfb session (shot 215/216: full result
+  view, CLI path open).
+- **Debian** `.deb` — real `dpkg-deb` inside an Ubuntu 25.10 chroot
+  (trixie's libadwaita 1.7.6 is below the crate's ≥ 1.8 floor);
+  computed `Depends` floors: libc6 ≥ 2.35, libgtk-4-1 ≥ 4.20.1,
+  libadwaita-1-0 ≥ 1.8.0.
+- **Fedora** `.rpm` — `rpmbuild` inside fedora:latest (`51.0.0-0.1.beta1`
+  pre-release versioning); `%check` (cargo test) ran **in the chroot and
+  caught a real test flake**: two independent walks of a live ext4
+  disagree while delalloc is pending, so `settle_fs()` now fsyncs
+  fixtures before size comparisons (btrfs inline extents had masked
+  this on the host).
+- **Flatpak** `.flatpak` single-file bundle (flatpak-builder,
+  org.gnome.Sdk//51) — installed `--user` and **run under the Xvfb
+  session from inside the sandbox** (shot 217: scans the passed host
+  path, renders list + rings; `--share=network` was required for the
+  crates.io fetch).
+- **Portable** `.tar.zst` (Ubuntu 25.10-built stripped binary +
+  license/desktop/icon) — extracted and run under Xvfb (shot 218).
+
 ## 3. Implemented, partially verified
 
 | Area | State | What is missing |
@@ -283,11 +310,11 @@ existing window navigates, S06).
 
 ## 4. Implemented but not runtime-verified
 
-- **Packaging**: `packaging/debian/` (control/rules/changelog/copyright),
-  `packaging/rpm/arbor.spec`, `packaging/arch/PKGBUILD`,
-  `packaging/flatpak/io.github.hakergeniusz.Arbor.json`. No
-  dpkg/rpmbuild/makepkg in the build environment and flatpak-builder
-  needs network — manifests are written and reviewed, **not built**.
+- **Packaging** — **built and released as of 51.0.0-beta.1** (see §2.12):
+  all five targets were compiled and their artifacts exercised; what
+  remains untested is *installation on the target distributions
+  themselves* (the .deb was never installed into a real Debian/Ubuntu
+  system, the .rpm into real Fedora — only built and inspected).
 - **aarch64**: all targets declare it (`arch: any`,
   `%{rust_tier1_arches}`, `arch=('x86_64' 'aarch64')`), but only x86_64
   was compiled and run locally.
