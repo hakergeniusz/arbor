@@ -13,7 +13,7 @@ dnf install -y --setopt=install_weak_deps=False \
 mkdir /work && tar xzf "/src/dist/arbor-${tag}.tar.gz" -C /work
 top=/rpmbuild
 mkdir -p "$top"/{SOURCES,SPECS,RPMS,BUILD,SRPMS,BUILDROOT}
-cp "/work/arbor-${tag}/packaging/rpm/arbor.spec" "$top/SPECS/"
+cp "/src/packaging/rpm/arbor.spec" "$top/SPECS/"
 cp "/src/dist/arbor-${tag}.tar.gz" "$top/SOURCES/${tag}.tar.gz"
 rpmbuild -bb --define "_topdir $top" "$top/SPECS/arbor.spec"
 cp "$top"/RPMS/x86_64/*.rpm /out/

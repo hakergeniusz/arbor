@@ -11,4 +11,4 @@ flatpak-builder --user --force-clean --repo=dist/flatpak-repo \
     dist/flatpak-build packaging/flatpak/io.github.hakergeniusz.Arbor.json
 flatpak build-bundle dist/flatpak-repo "dist/arbor-${tag}-x86_64.flatpak" \
     io.github.hakergeniusz.Arbor
-flatpak info "dist/arbor-${tag}-x86_64.flatpak" | head -20
+ls -la "dist/arbor-${tag}-x86_64.flatpak"

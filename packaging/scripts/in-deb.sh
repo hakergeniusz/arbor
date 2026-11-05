@@ -8,7 +8,11 @@ ver="${tag#v}"; debver="${ver//-/~}"          # 51.0.0-beta.1 -> 51.0.0~beta.1
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y --no-install-recommends \
-    ca-certificates cargo rustc libgtk-4-dev libadwaita-1-dev pkg-config binutils
+    ca-certificates curl gcc libgtk-4-dev libadwaita-1-dev pkg-config binutils
+# trixie's rustc 1.85 predates the locked dependency tree — use the current
+# stable toolchain via rustup instead of the distro rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+export PATH="$HOME/.cargo/bin:$PATH"
 
 mkdir /work && tar xzf "/src/dist/arbor-${tag}.tar.gz" -C /work
 cd "/work/arbor-${tag}"

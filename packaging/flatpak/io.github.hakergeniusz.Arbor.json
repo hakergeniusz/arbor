@@ -28,6 +28,11 @@
         {
             "name": "arbor",
             "buildsystem": "simple",
+            "build-options": {
+                "build-args": [
+                    "--share=network"
+                ]
+            },
             "build-commands": [
                 "cargo --version",
                 "cargo build --release --locked",
