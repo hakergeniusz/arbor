@@ -5,11 +5,11 @@ as an independent Rust/GTK4 application. This report distinguishes what is
 **implemented and tested**, what is **implemented but not fully verified**,
 and what is **not done** — no claims beyond that.
 
-- Head: `8c9a923` (branch `implementer/arbor`, pushed to
+- Head: `a08c2be` (branch `implementer/arbor`, pushed to
   https://github.com/hakergeniusz/arbor — private), version 1.0.0
-- Test suite: **27 tests, 0 failures** (16 unit + 11 scanner-integration)
-- GUI evidence: ~70 screenshots from the hermetic Xvfb session
-  (`/tmp/arbor-gui/shots/01…71`, referenced below as S###/A#–A# from
+- Test suite: **29 tests, 0 failures** (16 unit + 13 scanner-integration)
+- GUI evidence: ~100 screenshots from the hermetic Xvfb session
+  (`/tmp/arbor-gui/shots/01…106`, referenced below as S###/A#–A# from
   `docs/09-test-scenarios.md`)
 - Clean-room rules honored throughout: no Baobab source, no `tools/`
   inspection/execution, `/usr/bin/baobab` never launched.
@@ -57,18 +57,31 @@ and what is **not done** — no claims beyond that.
   without confirmation (S25, screenshots 69/70).
 
 ### 2.3 Result view (docs/04/10)
-- Breadcrumb, "Files may take more space than shown" infobar, spinner
-  column, sortable Folder/Size/Contents/Modified columns with
-  **working header-click sorting** (Size desc default; mirrored app-side
-  sibling sort; location row pinned first).
-- Percent badge + color-coded names per docs/10 §5 row format.
+- Header per docs/10 §2: `[‹ Back] [wide centered breadcrumb pill] [↻]
+  [window controls]` — **no Main Menu button on the result view** (F10 is
+  a no-op there; the menu lives on the start-page header, where it
+  returns on Back — verified in the final round, shots 102–106).
+- Breadcrumb pill: wide, centered (hexpand + AdwClamp), icon at its start.
+- "Files may take more space than shown" infobar, spinner column,
+  sortable Folder/Size/Contents/Modified columns with **working
+  header-click sorting** (Size desc default; mirrored app-side sibling
+  sort; location row pinned first).
+- Row anatomy per docs/10 §3: percentage **inside** a single dark
+  fill-pill badge (full-size ProgressBar under a centered label), plain
+  name color, permission-error names red, and folders rendered **amber
+  while their subtree is still being measured** (observed reference
+  behavior — visible during scans of the real home, shots 102/94; they
+  settle to the plain look once measured). The accessible row name leads
+  with the percentage ("37.05% Projects 79.6 GB …").
 - **Rings chart**: 12-o'clock origin, clockwise, children subdividing the
   parent arc, center total, hover brightening (verified via pixel
-  sampling), correct wedge geometry for the deep-nesting fixture.
+  sampling), correct wedge geometry for the deep-nesting fixture; drawn
+  for a 2.2M-item home scan (shot 103).
 - **Treemap**: squarified layout with per-level inset, labels when they
   fit, selection highlight, **treemap follows list selection** (S20b),
   double-click navigates into the deepest folder region, right-click
-  opens the item menu.
+  opens the item menu; correct squarified orientation at real-home scale
+  (shot 105).
 - Chart switcher buttons (Rings/Treemap) with correct active styling.
 
 ### 2.4 Actions (docs/05)
@@ -133,7 +146,7 @@ analyze mount points" checkbox, S09).
 
 | Area | State | What is missing |
 |---|---|---|
-| Large-tree GUI behavior | **Verified** on a 480-dir/16k-file fixture: progressive fill streams rows, totals grow live, and the F10 menu opens instantly mid-scan (`8c9a923` fixed the main-loop starvation that real home folders exposed — bounded drain per tick, scanner-side `DirListed` coalescing, throttled row/chart rebuilds; protocol pinned by `coalesced_stream_replays_to_the_final_tree`) | Home-folder scale (>10⁵ dirs) not reproduced locally — mechanics are size-independent (bounded work per tick) |
+| Large-tree GUI behavior | **Verified at home scale**: a 2,206,156-item / 294.3 GB home scan completes with a live UI — AT-SPI pings stay at 0–45 ms throughout (the unfixed build locked up at second 16), rows/amber state stream in progressively, rings and treemap render at full scale (shots 102–105). Fixes: `8c9a923` (bounded drain, scanner-side coalescing, throttled repaints) and `a08c2be` (O(1) merge duplicate guard + parent grouping — the per-entry linear scan made flat directories O(n²) on the UI thread; single-descent measured-delta walk; chart projection skipped while hidden behind the spinner page). Merge behavior pinned by `coalesced_stream_replays_to_the_final_tree`, `flat_directory_merges_in_linear_time`, `merge_entries_is_idempotent_per_path` | Even larger trees (>10⁷ items) untested; peak RSS for the 2.2M-item tree was ~3 GB — no eviction/summarization exists (same as the reference for an immutable snapshot) |
 | Preferences ignore-list effect | Dialog + persistence implemented; settings round-trip unit-tested; ignore filtering itself unit-tested (`ignored_subtrees_are_excluded`) | No GUI test of an ignored location being excluded from a scan (chooser-typing is unreliable in the harness) |
 | Multi-device trash undo | Candidate-dir walk unit-tested (same-device topdirs, `.Trash-$uid`) | No real second-partition Trash exercised |
 | Help failure toast | F1 **positively verified** in GUI: the platform default URL handler launches the help page (it did open the machine's handler in the sandbox) | The "Failed to open help" toast needs a handler-less machine — failure branch logic-reviewed only |
@@ -161,6 +174,11 @@ existing window navigates, S06).
   the *plan* (not the spec): `fsops.rs` folded into `trash.rs` + UI
   actions; `treemap.rs` merged into `ui/charts.rs`; `ui/confirm.rs` added
   for the mandatory dialog; `libc` is a regular dependency (`geteuid`).
+- One deliberate deviation from the *spec text* (docs/10 §5 "List name
+  colors match segment colors"): names render plain, matching the
+  observed reference application itself (user-supplied real screenshot,
+  second review round) — names are colored only for permission errors
+  (red) and while a folder is still being measured (amber).
 - Known environment caveat: with the Trash directory made read-only the
   failure is reported as a toast (R5/R7); behavior with a *foreign*
   topdir (different device, no `.Trash-$uid`) follows the same candidate
@@ -177,6 +195,7 @@ existing window navigates, S06).
 | 6 | `df1fa30` feat(a11y): keyboard menus, accessible rows and chart descriptions |
 | 7 | `e507091` build: packaging, license audit and project documentation |
 | fix | `8c9a923` fix(scan): keep the UI responsive on large scans (first real-desktop review) |
+| fix | `a08c2be` fix(scan,ui): survive multi-million-entry scans; match reference result view (second real-desktop review) |
 
 ## 7. Safety statement
 
