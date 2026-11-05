@@ -289,6 +289,7 @@ fn folder_factory(row_context_cb: Rc<RefCell<Option<RowContextCb>>>) -> gtk::Sig
 
         let expander = gtk::Button::new();
         expander.add_css_class("flat");
+        expander.add_css_class("row-expander");
         let arrow = gtk::Image::from_icon_name("pan-end-symbolic");
         arrow.set_pixel_size(12);
         expander.set_child(Some(&arrow));

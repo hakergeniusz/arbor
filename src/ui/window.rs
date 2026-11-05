@@ -1691,6 +1691,20 @@ fn load_css() {
         label.unmeasured {
             color: @arbor_amber;
         }
+        /* Denser item list (user request): the default button chrome and row
+           padding made every row ~33 logical px tall — mostly air. */
+        columnview row {
+            min-height: 0px;
+            padding-top: 0px;
+            padding-bottom: 0px;
+        }
+        button.row-expander {
+            min-height: 0px;
+            padding-top: 0px;
+            padding-bottom: 0px;
+            padding-left: 2px;
+            padding-right: 2px;
+        }
         "#,
     );
     gtk::style_context_add_provider_for_display(
