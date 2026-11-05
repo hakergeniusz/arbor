@@ -221,17 +221,24 @@ fn mount_row(mount: &MountInfo) -> gtk::ListBoxRow {
     row
 }
 
-/// A 40px circular disc with a symbolic icon, as used in the reference rows.
-pub fn disc_icon(icon_name: &str) -> gtk::Box {
-    let disc = gtk::Box::new(Orientation::Horizontal, 0);
-    disc.set_size_request(40, 40);
-    disc.set_halign(Align::Center);
-    disc.set_valign(Align::Center);
-    disc.add_css_class("disc");
+/// A 40px circular disc with a symbolic icon centered inside it, as used in
+/// the reference rows. A plain Box start-packs its child (the glyph sat at
+/// the circle's left edge — user report), so the disc is an Overlay: the
+/// circle is the overlay's own background and the glyph is an *overlay*
+/// child, which libadwaita positions strictly by its halign/valign (the
+/// main child would just fill the whole 40×40 area instead).
+pub fn disc_icon(icon_name: &str) -> gtk::Widget {
+    let overlay = gtk::Overlay::new();
+    overlay.set_size_request(40, 40);
+    overlay.set_halign(Align::Center);
+    overlay.set_valign(Align::Center);
+    overlay.add_css_class("disc");
     let image = gtk::Image::from_icon_name(icon_name);
     image.set_pixel_size(18);
-    disc.append(&image);
-    disc
+    image.set_halign(Align::Center);
+    image.set_valign(Align::Center);
+    overlay.add_overlay(&image);
+    overlay.upcast()
 }
 
 fn home_dir_string() -> String {
