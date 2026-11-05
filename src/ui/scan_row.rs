@@ -48,6 +48,10 @@ mod imp {
         pub expanded: Cell<bool>,
         #[property(get, set)]
         pub depth: Cell<u32>,
+        /// False while the row's folder subtree is still being measured —
+        /// the row renders amber until the aggregate is final.
+        #[property(get, set)]
+        pub measured: Cell<bool>,
         /// Name color (matches the chart segment color; docs/10 §5).
         #[property(get, set)]
         pub color: RefCell<String>,
@@ -80,15 +84,22 @@ impl ScanRow {
     }
 
     /// One readable string per row for assistive technology
-    /// (docs/08 §1: rows fully readable as text).
+    /// (docs/08 §1: rows fully readable as text — "98.56% name size items
+    /// modified"; the location row carries no percentage).
     pub fn accessible_text(&self) -> String {
+        let pct = if self.is_location() {
+            String::new()
+        } else {
+            format!("{:.2}% ", self.percent() * 100.0)
+        };
         format!(
-            "{}{} {} {} {}",
+            "{}{}{} {} {} {}",
             if self.is_dir() && !self.is_location() && self.has_children() {
                 if self.expanded() { "expanded, " } else { "collapsed, " }
             } else {
                 ""
             },
+            pct,
             self.name(),
             self.size_str(),
             self.items_str(),

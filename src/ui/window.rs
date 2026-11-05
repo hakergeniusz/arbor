@@ -61,6 +61,9 @@ struct WindowState {
     scan: Option<ScanHandle>,
     /// Measured scan tree root (None until the first DirListed arrives).
     tree: Option<DisplayNode>,
+    /// Paths already merged into `tree` (fresh per scan) — the O(1)
+    /// duplicate guard for `merge_entries` (see models.rs).
+    known: HashSet<PathBuf>,
     /// Folders expanded inline in the list.
     expanded: HashSet<PathBuf>,
     /// Folder the list currently shows (navigation inside a scan).
@@ -113,7 +116,9 @@ impl ArborUi {
         header.pack_start(&back_btn);
 
         // Title widget: a stack switching between the plain title and the
-        // location pill.
+        // location pill. The stack expands across the header's center and an
+        // AdwClamp caps the pill so it renders as a wide, centered field
+        // (docs/01 §3, docs/10 §2) instead of hugging its text.
         let title_start = gtk::Label::new(Some("Devices & Locations"));
         title_start.add_css_class("title");
 
@@ -124,12 +129,19 @@ impl ArborUi {
         let pill_segments = gtk::Box::new(Orientation::Horizontal, 0);
         pill.append(&pill_icon);
         pill.append(&pill_segments);
+        pill.set_hexpand(true);
+
+        let pill_clamp = adw::Clamp::new();
+        pill_clamp.set_maximum_size(880);
+        pill_clamp.set_tightening_threshold(480);
+        pill_clamp.set_child(Some(&pill));
 
         let title_stack = gtk::Stack::new();
         title_stack.set_transition_type(gtk::StackTransitionType::None);
         title_stack.set_hhomogeneous(false);
+        title_stack.set_hexpand(true);
         title_stack.add_named(&title_start, Some("title"));
-        title_stack.add_named(&pill, Some("pill"));
+        title_stack.add_named(&pill_clamp, Some("pill"));
         header.set_title_widget(Some(&title_stack));
 
         let rescan_btn = gtk::Button::from_icon_name("view-refresh-symbolic");
@@ -177,6 +189,7 @@ impl ArborUi {
                 current: None,
                 scan: None,
                 tree: None,
+                known: HashSet::new(),
                 expanded: HashSet::new(),
                 current_folder: PathBuf::new(),
                 pending_autoselect: false,
@@ -403,7 +416,11 @@ impl ArborUi {
             let ui = self.clone();
             let action = gio::SimpleAction::new("main-menu", None);
             action.connect_activate(move |_, _| {
-                ui.menu_btn.popup();
+                // The Main Menu button only exists on the start-page header
+                // (docs/10 §2: the result view has no ☰).
+                if ui.menu_btn.is_visible() {
+                    ui.menu_btn.popup();
+                }
             });
             self.window.add_action(&action);
         }
@@ -546,13 +563,17 @@ impl ArborUi {
             state.current = Some(path.to_path_buf());
             state.current_folder = path.to_path_buf();
             state.tree = None;
+            state.known.clear();
             state.expanded.clear();
             state.pending_autoselect = true;
         }
 
-        // Header state (docs/01 §3).
+        // Header state (docs/01 §3): Back + Rescan appear, the Main Menu
+        // button does not — the result-view header is
+        // [‹ Back] [pill] [↻] [window controls] (docs/10 §2).
         self.back_btn.set_visible(true);
         self.rescan_btn.set_visible(true);
+        self.menu_btn.set_visible(false);
         self.title_stack().set_visible_child_name("pill");
         self.pill_icon.set_icon_name(Some(if path.to_path_buf() == glib::home_dir() {
             "user-home-symbolic"
@@ -676,15 +697,18 @@ impl ArborUi {
                             own_size: 0,
                             mtime: None,
                         }));
+                        state.known.clear();
                     }
-                    let tree = state.tree.as_mut().unwrap();
                     // Merge entries under their own parents (shared with the
                     // protocol tests).
-                    tree.merge_entries(&entries);
+                    let WindowState { tree, known, rows_dirty, .. } = &mut *state;
+                    tree.as_mut()
+                        .expect("tree was just created")
+                        .merge_entries(&entries, known);
                     // Repaint on the throttle in repaint_rows, not per event —
                     // a home-folder scan would otherwise rebuild O(rows) per
                     // directory and O(subtree) for the charts.
-                    state.rows_dirty = true;
+                    *rows_dirty = true;
                 }
             }
             ScanUpdate::DirMeasured { path, size, items, error, mtime } => {
@@ -707,8 +731,10 @@ impl ArborUi {
                 // Completed scans enter the recents list (docs/03 §6).
                 self.settings.borrow_mut().push_recent(&root.display().to_string());
                 self.refresh_start_page();
-                self.repaint_rows(true);
+                // Charts become visible first so the forced repaint below
+                // projects them (the projection is skipped while hidden).
                 self.show_chart_page();
+                self.repaint_rows(true);
             }
             ScanUpdate::Failed { path } => {
                 self.cancel_scan();
@@ -747,11 +773,8 @@ impl ArborUi {
         let rows = {
             let state = self.state.borrow();
             let Some(tree) = &state.tree else { return };
-            let Some(root) = state.current.as_ref().and_then(|p| tree.find(p)) else {
-                return;
-            };
             let Some(current) = tree.find(&state.current_folder) else { return };
-            build_rows(current, root, &state.expanded, state.sort)
+            build_rows(current, &state.expanded, state.sort)
         };
         self.result_view.set_rows(&rows);
         self.update_charts();
@@ -782,11 +805,8 @@ impl ArborUi {
             let rows = {
                 let state = self.state.borrow();
                 let Some(tree) = &state.tree else { return };
-                let Some(root) = state.current.as_ref().and_then(|p| tree.find(p)) else {
-                    return;
-                };
                 let Some(current) = tree.find(&state.current_folder) else { return };
-                build_rows(current, root, &state.expanded, state.sort)
+                build_rows(current, &state.expanded, state.sort)
             };
             self.result_view.set_rows(&rows);
             {
@@ -801,8 +821,14 @@ impl ArborUi {
             }
         }
         if chart_due {
-            self.update_charts();
-            self.state.borrow_mut().last_chart.set(now);
+            // Projecting charts clones the visible subtree — skip it while
+            // the spinner page covers them (the whole scan) so the main
+            // loop never pays for invisible work; `Finished` shows the
+            // chart page before the forced repaint.
+            if self.result_view.charts_visible() {
+                self.update_charts();
+                self.state.borrow_mut().last_chart.set(now);
+            }
         }
     }
 
@@ -862,6 +888,8 @@ impl ArborUi {
         self.state.borrow_mut().current = None;
         self.back_btn.set_visible(false);
         self.rescan_btn.set_visible(false);
+        // The Main Menu lives on the start-page header (docs/01 §1).
+        self.menu_btn.set_visible(true);
         self.title_stack().set_visible_child_name("title");
         self.stack.set_visible_child_name("start");
         self.window.set_title(Some("Devices & Locations"));
@@ -1086,7 +1114,6 @@ use crate::models::EntryMeta;
 /// folders inline (docs/04 §2, docs/02 §3).
 fn build_rows(
     current: &DisplayNode,
-    root: &DisplayNode,
     expanded: &HashSet<PathBuf>,
     sort: (SortKey, bool),
 ) -> Vec<ScanRow> {
@@ -1095,16 +1122,15 @@ fn build_rows(
 
     // Pinned location row with up-arrow (docs/02 §3).
     let loc = ScanRow::new(current.path.clone());
-    fill_row(&loc, current, root, total, true, 0, false);
+    fill_row(&loc, current, total, true, 0, false);
     rows.push(loc);
 
-    emit_children(current, root, expanded, total, sort, 1, &mut rows);
+    emit_children(current, expanded, total, sort, 1, &mut rows);
     rows
 }
 
 fn emit_children(
     node: &DisplayNode,
-    root: &DisplayNode,
     expanded: &HashSet<PathBuf>,
     total: u64,
     sort: (SortKey, bool),
@@ -1128,10 +1154,10 @@ fn emit_children(
     });
     for child in children {
         let row = ScanRow::new(child.path.clone());
-        fill_row(&row, child, root, total, false, depth, expanded.contains(&child.path));
+        fill_row(&row, child, total, false, depth, expanded.contains(&child.path));
         rows.push(row);
         if child.is_dir && expanded.contains(&child.path) {
-            emit_children(child, root, expanded, total, sort, depth + 1, rows);
+            emit_children(child, expanded, total, sort, depth + 1, rows);
         }
     }
 }
@@ -1139,7 +1165,6 @@ fn emit_children(
 fn fill_row(
     row: &ScanRow,
     node: &DisplayNode,
-    root: &DisplayNode,
     total: u64,
     is_location: bool,
     depth: u32,
@@ -1166,13 +1191,10 @@ fn fill_row(
     row.set_depth(depth);
     row.set_has_children(node.is_dir && (!node.measured || !node.children.is_empty()));
     row.set_expanded(is_expanded);
-    // Name color matches the chart segment (docs/10 §5).
-    let color = if node.error {
-        crate::ui::palette::ERROR_COLOR.to_string()
-    } else {
-        crate::ui::palette::color_for(&node.path, &root.path, &sorted_root_children(root))
-    };
-    row.set_color(color.as_str());
+    // Names render plain (like the observed reference); a still-unmeasured
+    // folder is highlighted amber until its aggregate is final, and
+    // permission-error rows stay red (docs/10 §5).
+    row.set_measured(node.measured || !node.is_dir);
 }
 
 /// The scan root's children as name-sorted paths — the stable palette index
@@ -1233,6 +1255,10 @@ fn load_css() {
     let provider = gtk::CssProvider::new();
     provider.load_from_string(
         r#"
+        /* Amber highlight for folders whose subtree is still being measured
+           (observed reference behavior): name and badge fill turn amber and
+           settle to the plain/accent look once the aggregate is final. */
+        @define-color arbor_amber #e5a50a;
         .location-pill {
             background-color: alpha(currentColor, 0.08);
             border-radius: 9999px;
@@ -1253,25 +1279,38 @@ fn load_css() {
             border-radius: 4px;
             min-height: 8px;
         }
+        /* Percent badge: one dark pill whose fill (a full-size ProgressBar)
+           represents the share, with the percentage centered on top
+           (docs/10 §3 row anatomy). */
         .percent-badge {
             border-radius: 9999px;
-            padding: 0 6px;
-            background-color: alpha(@accent_color, 0.15);
+            background-color: alpha(currentColor, 0.14);
         }
-        .percent-badge > progressbar.mini {
-            min-width: 24px;
+        .percent-badge progressbar {
+            min-width: 64px;
         }
-        .percent-badge > progressbar.mini > trough {
-            min-height: 6px;
-            min-width: 24px;
-            border-radius: 3px;
+        .percent-badge progressbar > trough {
+            min-width: 64px;
         }
-        .percent-badge > progressbar.mini > trough > progress {
-            border-radius: 3px;
-            min-height: 6px;
+        .percent-badge progressbar > trough {
+            min-height: 17px;
+            border-radius: 9999px;
+            background: transparent;
+        }
+        .percent-badge progressbar > trough > progress {
+            min-height: 17px;
+            border-radius: 9999px;
+            background-color: @accent_color;
+        }
+        .percent-badge.unmeasured progressbar > trough > progress {
+            background-color: @arbor_amber;
         }
         .percent-badge > label.mini {
-            font-size: 0.85em;
+            font-size: 0.82em;
+            font-weight: bold;
+        }
+        label.unmeasured {
+            color: @arbor_amber;
         }
         "#,
     );

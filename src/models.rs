@@ -6,6 +6,7 @@
 // Some helpers are consumed by later phases or unit tests.
 #![allow(dead_code)]
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Metadata of one directory entry as reported by the scanner.
@@ -145,23 +146,48 @@ impl DisplayNode {
     /// dropped by the caller's convention, so this returns how many were
     /// merged. Duplicates are skipped — a later `DirMeasured` refines them.
     /// This is the exact merge the UI performs per scanner update.
-    pub fn merge_entries(&mut self, entries: &[EntryMeta]) -> usize {
-        let mut merged = 0;
+    ///
+    /// `known` is the caller-owned set of already-merged paths, fresh per
+    /// scan. The duplicate guard used to be a linear scan of the parent's
+    /// children, which made one flat directory of n entries cost O(n²) on
+    /// the main loop and froze real home-folder scans; a hashed set keeps
+    /// the merge O(1) per entry.
+    pub fn merge_entries(&mut self, entries: &[EntryMeta], known: &mut HashSet<PathBuf>) -> usize {
+        // Group by parent so a batch performs one root-to-parent walk per
+        // directory, not one per entry — but keep the groups in
+        // first-appearance order: a batch may contain a directory and its
+        // own children, and the parent must be created first (the scanner
+        // always lists a directory before listing it, so its entry precedes
+        // its children's).
+        let mut groups: Vec<(PathBuf, Vec<&EntryMeta>)> = Vec::new();
+        let mut group_index: HashMap<PathBuf, usize> = HashMap::new();
         for meta in entries {
             let Some(parent_path) = meta.path.parent() else { continue };
-            let Some(parent) = self.find_mut(parent_path) else { continue };
-            if parent.children.iter().any(|c| c.path == meta.path) {
-                continue; // already known; DirMeasured refines it
+            match group_index.get(parent_path) {
+                Some(&i) => groups[i].1.push(meta),
+                None => {
+                    group_index.insert(parent_path.to_path_buf(), groups.len());
+                    groups.push((parent_path.to_path_buf(), vec![meta]));
+                }
             }
-            let node = if meta.is_dir {
-                DisplayNode::new_dir(meta)
-            } else {
-                DisplayNode::new_file(meta)
-            };
-            parent.size += node.size;
-            parent.items += 1;
-            parent.children.push(node);
-            merged += 1;
+        }
+        let mut merged = 0;
+        for (parent_path, metas) in groups {
+            let Some(parent) = self.find_mut(&parent_path) else { continue };
+            for meta in metas {
+                if !known.insert(meta.path.clone()) {
+                    continue; // already known; DirMeasured refines it
+                }
+                let node = if meta.is_dir {
+                    DisplayNode::new_dir(meta)
+                } else {
+                    DisplayNode::new_file(meta)
+                };
+                parent.size += node.size;
+                parent.items += 1;
+                parent.children.push(node);
+                merged += 1;
+            }
         }
         merged
     }
@@ -184,22 +210,35 @@ impl DisplayNode {
         node.error = error;
         node.mtime = Some(mtime);
         node.measured = true;
-        propagate_delta_up(self, path, size.saturating_sub(old), 0);
+        let size_delta = size.saturating_sub(old);
+        // Roll the delta up to every strict ancestor in one root-to-node
+        // descent. The previous per-ancestor `find_mut` walk was
+        // O(depth² × siblings) per message — measurable on scans with
+        // hundreds of thousands of directories.
+        if size_delta > 0 {
+            add_delta_along(self, path, size_delta);
+        }
         true
     }
 }
 
-/// After a child node's aggregate was (re)computed, roll the delta up to all
-/// ancestors so running totals stay live during the scan (docs/03 §2).
-fn propagate_delta_up(tree: &mut DisplayNode, child_path: &Path, size_delta: u64, items_delta: u64) {
-    let mut parent_path = child_path.parent();
-    while let Some(pp) = parent_path {
-        if let Some(parent) = tree.find_mut(pp) {
-            parent.size = parent.size.saturating_add(size_delta);
-            parent.items = parent.items.saturating_add(items_delta);
-            parent_path = pp.parent();
-        } else {
-            break;
+/// Add `size_delta` to every node on the root→`path` chain except the
+/// terminal node itself (its aggregate was assigned directly, so adding the
+/// correction there too would double it — this is exactly what broke when
+/// the scan root's own `DirMeasured` arrived). Exactly one child per level
+/// can contain `path`.
+fn add_delta_along(node: &mut DisplayNode, path: &Path, size_delta: u64) {
+    if node.path == path {
+        return;
+    }
+    node.size = node.size.saturating_add(size_delta);
+    for child in &mut node.children {
+        if child.path == path {
+            return;
+        }
+        if path.starts_with(&child.path) {
+            add_delta_along(child, path, size_delta);
+            return;
         }
     }
 }

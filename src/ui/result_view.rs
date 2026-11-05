@@ -167,6 +167,12 @@ impl ResultView {
         }
     }
 
+    /// True while a chart page (not the scanning spinner) is frontmost —
+    /// the chart projection is skipped while charts are covered.
+    pub fn charts_visible(&self) -> bool {
+        self.chart_stack.visible_child_name().as_deref() != Some("spinner")
+    }
+
     /// Reflect `mode` in the toggle buttons. Signal handlers live in the
     /// window and are idempotent w.r.t. state, so plain set_active is safe.
     pub fn set_mode_buttons(&self, mode: ChartMode) {
@@ -229,21 +235,26 @@ fn folder_factory(row_context_cb: Rc<RefCell<Option<RowContextCb>>>) -> gtk::Sig
         expander.set_child(Some(&arrow));
         expander.set_valign(Align::Center);
 
-        let badge = gtk::Box::new(Orientation::Horizontal, 4);
+        // Percent badge: one dark pill whose fill represents the share with
+        // the percentage centered on top (docs/10 §3 row anatomy).
+        let badge = gtk::Overlay::new();
         badge.add_css_class("percent-badge");
+        badge.set_width_request(64);
         badge.set_valign(Align::Center);
+        badge.set_halign(Align::Start);
         let badge_bar = gtk::ProgressBar::new();
-        badge_bar.add_css_class("mini");
-        badge_bar.set_width_request(24);
+        // No hexpand here: expand computes through the Overlay to the row
+        // Box, which would starve the name label of its column width.
         // The bar's raw fraction would otherwise be concatenated into the
         // row's accessible name ("0.985563 98.56% …"); the visible percentage
         // label already carries the value (docs/10 §5 row format).
         badge_bar.set_accessible_role(gtk::AccessibleRole::None);
+        badge.set_child(Some(&badge_bar));
         let badge_label = gtk::Label::new(None);
         badge_label.add_css_class("mini");
-        badge_label.set_width_request(42);
-        badge.append(&badge_bar);
-        badge.append(&badge_label);
+        badge_label.set_halign(Align::Center);
+        badge_label.set_valign(Align::Center);
+        badge.add_overlay(&badge_label);
 
         let name = gtk::Label::new(None);
         name.set_ellipsize(gtk::pango::EllipsizeMode::End);
@@ -267,31 +278,33 @@ fn folder_factory(row_context_cb: Rc<RefCell<Option<RowContextCb>>>) -> gtk::Sig
         )]);
         // Children were appended in this order in setup.
         let Some(expander) = container.first_child().and_downcast::<gtk::Button>() else { return };
-        let Some(badge) = expander.next_sibling().and_downcast::<gtk::Box>() else { return };
-        let Some(badge_bar) = badge.first_child().and_downcast::<gtk::ProgressBar>() else { return };
+        let Some(badge) = expander.next_sibling().and_downcast::<gtk::Overlay>() else { return };
+        let Some(badge_bar) = badge.child().and_downcast::<gtk::ProgressBar>() else { return };
+        // The overlay's first overlay child follows the main child in the
+        // widget tree (setup appended exactly one).
         let Some(badge_label) = badge_bar.next_sibling().and_downcast::<gtk::Label>() else { return };
         let Some(name) = badge.next_sibling().and_downcast::<gtk::Label>() else { return };
         let Some(arrow) = expander.child().and_downcast::<gtk::Image>() else { return };
 
         name.set_text(&row_obj.name());
-        let color = if row_obj.error() {
-            ERROR_COLOR.to_string()
-        } else if row_obj.is_location() {
-            String::new()
+        // Plain name color; red only for permission-error rows, amber while
+        // the folder's subtree is still being measured (docs/10 §5).
+        if row_obj.error() {
+            if let Ok(rgba) = gtk::gdk::RGBA::parse(ERROR_COLOR) {
+                let attrs = gtk::pango::AttrList::new();
+                attrs.insert(gtk::pango::AttrColor::new_foreground(
+                    (rgba.red() * 65535.0) as u16,
+                    (rgba.green() * 65535.0) as u16,
+                    (rgba.blue() * 65535.0) as u16,
+                ));
+                name.set_attributes(Some(&attrs));
+            }
         } else {
-            row_obj.color().to_string()
-        };
-        if color.is_empty() {
             name.set_attributes(None);
-        } else if let Ok(rgba) = gtk::gdk::RGBA::parse(&color) {
-            let attrs = gtk::pango::AttrList::new();
-            attrs.insert(gtk::pango::AttrColor::new_foreground(
-                (rgba.red() * 65535.0) as u16,
-                (rgba.green() * 65535.0) as u16,
-                (rgba.blue() * 65535.0) as u16,
-            ));
-            name.set_attributes(Some(&attrs));
         }
+        let unmeasured = !row_obj.measured();
+        set_class_flag(&name, "unmeasured", unmeasured && !row_obj.error());
+        set_class_flag(&badge, "unmeasured", unmeasured);
 
         let depth = row_obj.depth();
         expander.set_margin_start(12 * depth as i32);
@@ -321,6 +334,15 @@ fn folder_factory(row_context_cb: Rc<RefCell<Option<RowContextCb>>>) -> gtk::Sig
 }
 
 const ERROR_COLOR: &str = "#e01b24";
+
+/// Add/remove a CSS class by flag (GTK 4.10 has no toggle_css_class).
+fn set_class_flag(widget: &impl gtk::prelude::IsA<gtk::Widget>, class: &str, on: bool) {
+    if on {
+        widget.add_css_class(class);
+    } else {
+        widget.remove_css_class(class);
+    }
+}
 
 /// Right-click on a row: report it to the window's context-menu handler
 /// (docs/05 §1). The gesture is attached to the row cell; the owning

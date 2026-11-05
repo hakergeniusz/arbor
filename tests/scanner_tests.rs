@@ -349,6 +349,7 @@ fn coalesced_stream_replays_to_the_final_tree() {
     let updates = collect_updates(&dir);
 
     let mut tree: Option<arbor::models::DisplayNode> = None;
+    let mut known: HashSet<PathBuf> = HashSet::new();
     let mut measured: HashMap<PathBuf, (u64, u64)> = HashMap::new();
     for update in &updates {
         match update {
@@ -367,7 +368,7 @@ fn coalesced_stream_replays_to_the_final_tree() {
                         },
                     ));
                 }
-                let merged = tree.as_mut().unwrap().merge_entries(entries);
+                let merged = tree.as_mut().unwrap().merge_entries(entries, &mut known);
                 assert_eq!(
                     merged,
                     entries.len(),
@@ -428,4 +429,87 @@ fn coalesced_stream_replays_to_the_final_tree() {
     );
 
     fs::remove_dir_all(&dir).ok();
+}
+
+/// The merge path must stay flat: one directory with 60,000 entries merges
+/// in bounded time. The pre-fix duplicate guard scanned the parent's
+/// children linearly per entry — O(n²) on the main loop — which froze real
+/// home-folder scans (a single flat directory with hundreds of thousands of
+/// files). 60k in-memory entries would take tens of seconds the old way.
+#[test]
+fn flat_directory_merges_in_linear_time() {
+    use std::collections::HashSet;
+
+    let n = 60_000usize;
+    let parent: PathBuf = "/flat".into();
+    let entries: Vec<arbor::models::EntryMeta> = (0..n)
+        .map(|i| arbor::models::EntryMeta {
+            name: format!("f{i:05}.bin"),
+            path: parent.join(format!("f{i:05}.bin")),
+            is_dir: false,
+            error: false,
+            own_size: 100,
+            mtime: None,
+        })
+        .collect();
+    let root_meta = arbor::models::EntryMeta {
+        name: "flat".into(),
+        path: parent.clone(),
+        is_dir: true,
+        error: false,
+        own_size: 0,
+        mtime: None,
+    };
+    let mut tree = arbor::models::DisplayNode::new_dir(&root_meta);
+    let mut known = HashSet::new();
+    let started = std::time::Instant::now();
+    // Replay batch-by-batch exactly like the UI drain (emitter batches are
+    // capped at 512 entries).
+    let mut merged_total = 0;
+    for chunk in entries.chunks(512) {
+        merged_total += tree.merge_entries(chunk, &mut known);
+    }
+    let elapsed = started.elapsed();
+    assert_eq!(merged_total, n);
+    assert_eq!(tree.find(&parent).unwrap().items, n as u64 + 1);
+    assert_eq!(tree.find(&parent).unwrap().size, n as u64 * 100);
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "merging {n} flat entries took {elapsed:?} — the merge went quadratic again"
+    );
+}
+
+/// Merging the same batch twice must be a no-op (duplicate guard): no extra
+/// nodes, no double-counted aggregates.
+#[test]
+fn merge_entries_is_idempotent_per_path() {
+    use std::collections::HashSet;
+
+    let parent: PathBuf = "/dup".into();
+    let meta = |name: &str| arbor::models::EntryMeta {
+        name: name.into(),
+        path: parent.join(name),
+        is_dir: false,
+        error: false,
+        own_size: 10,
+        mtime: None,
+    };
+    let entries = vec![meta("a"), meta("b"), meta("c")];
+    let root_meta = arbor::models::EntryMeta {
+        name: "dup".into(),
+        path: parent.clone(),
+        is_dir: true,
+        error: false,
+        own_size: 0,
+        mtime: None,
+    };
+    let mut tree = arbor::models::DisplayNode::new_dir(&root_meta);
+    let mut known = HashSet::new();
+    assert_eq!(tree.merge_entries(&entries, &mut known), 3);
+    // Replay the identical listing: nothing new may be merged.
+    assert_eq!(tree.merge_entries(&entries, &mut known), 0);
+    let node = tree.find(&parent).unwrap();
+    assert_eq!(node.items, 4); // self + a + b + c
+    assert_eq!(node.size, 30);
+    assert_eq!(node.children.len(), 3);
 }
