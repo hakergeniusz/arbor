@@ -235,6 +235,17 @@ mount-name display names (above). Two user requests implemented:
   finalized aggregates, garbage/foreign-path rejection, `collect_paths`,
   and a real cached-scan roundtrip through `spawn_ext`.
 
+**Follow-up polish (same day, shots 207–209)**: two user-flagged
+mismatches fixed — (1) scanning a mount root recorded a **recent row
+duplicating the permanent device row** ("nvme0n1p2" twice: drive icon
+with stats vs bare folder row); mount roots and the home folder no
+longer enter the recents list, and state written earlier is migrated
+cleaned on the next launch (shot 207). (2) The treemap's per-level
+3 px insets + 1.5 px strokes stacked into pale moats between tile
+groups ("gaps are too big") — insets halved to 1.5 px and strokes to
+1 px, tiles now separate by ~2–3 px hairlines (shot 209 vs the user's
+screenshot).
+
 ## 3. Implemented, partially verified
 
 | Area | State | What is missing |
@@ -270,6 +281,9 @@ existing window navigates, S06).
 - **Chart pane optional** (user request beyond the spec): Preferences
   "Show chart" (default on, persisted) hides the rings/treemap pane; when
   off, the result view is the full-width list per the same anatomy.
+- **Recents exclude mount roots and the home folder** (user request beyond
+  the spec's letter): both have permanent rows in "This Device"; recording
+  them produced duplicated, differently-styled rows.
 - About identity: the dialog and menu say **Arbor** (clean-room app,
   developer hakergeniusz) rather than the reference's GNOME branding —
   same row structure as docs/01 §8.

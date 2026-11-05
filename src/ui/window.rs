@@ -242,6 +242,22 @@ impl ArborUi {
         if let Some(size) = ui.settings.borrow().window_size {
             window.set_default_size(size.width.max(400), size.height.max(300));
         }
+        // One-time cleanup of state written before mount roots stopped being
+        // recorded: their rows duplicated the permanent device rows.
+        {
+            let mut settings = ui.settings.borrow_mut();
+            if !settings.recents.is_empty() {
+                let home = glib::home_dir();
+                let mounts = crate::mounts::list_mounts();
+                let before = settings.recents.len();
+                settings
+                    .recents
+                    .retain(|p| Path::new(p) != home && !mounts.iter().any(|m| m.root == Path::new(p)));
+                if settings.recents.len() != before {
+                    save_settings(&settings);
+                }
+            }
+        }
         ui.start_page.rebuild(&ui.settings);
         ui.apply_chart_visibility();
 
@@ -956,8 +972,17 @@ impl ArborUi {
                     let mut state = self.state.borrow_mut();
                     state.scan = None;
                 }
-                // Completed scans enter the recents list (docs/03 §6).
-                self.settings.borrow_mut().push_recent(&root.display().to_string());
+                // Completed scans enter the recents list (docs/03 §6) —
+                // except mount roots and the home folder: both have their
+                // own permanent rows in "This Device", and recording them
+                // produced a mismatched duplicate row (fourth-round user
+                // report: "nvme0n1p2" twice, once as a device, once as a
+                // bare folder row).
+                let is_permanent_row = root == glib::home_dir()
+                    || crate::mounts::list_mounts().iter().any(|m| m.root == root);
+                if !is_permanent_row {
+                    self.settings.borrow_mut().push_recent(&root.display().to_string());
+                }
                 self.refresh_start_page();
                 self.result_view.set_scan_progress(false, None);
                 // Charts become visible first so the forced repaint below

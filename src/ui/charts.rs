@@ -527,7 +527,7 @@ mod tree_imp {
                 cairo.fill().unwrap();
                 // Parent/child separation + labels when they fit (docs/04 §8).
                 cairo.set_source_rgb(1.0, 1.0, 1.0);
-                cairo.set_line_width(1.5);
+                cairo.set_line_width(1.0);
                 cairo.rectangle(r.x, r.y, r.w, r.h);
                 cairo.stroke().unwrap();
                 if r.w > 60.0 && r.h > 24.0 {
@@ -696,7 +696,9 @@ fn layout_node(node: &ChartNode, x: f64, y: f64, w: f64, h: f64, depth: usize, r
         return;
     }
     let weights: Vec<f64> = node.children.iter().map(|c| c.size as f64).collect();
-    const INSET: f64 = 3.0;
+    // 1.5 px per nesting level: deeper insets stack into visible pale moats
+    // between tile groups (fourth-round user report: "gaps are too big").
+    const INSET: f64 = 1.5;
     let laid = crate::squarify::squarify(&weights, x + INSET, y + INSET, (w - 2.0 * INSET).max(0.0), (h - 2.0 * INSET).max(0.0));
     for r in laid {
         let child = &node.children[r.index];
