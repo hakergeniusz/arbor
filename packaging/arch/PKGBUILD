@@ -1,7 +1,9 @@
 # Maintainer: hakergeniusz <hakergeniusz@users.noreply.github.com>
 # Build from a source checkout:  makepkg -p PKGBUILD  (inside packaging/arch)
+# or place the release tarball next to the PKGBUILD and makepkg uses it.
 pkgname=arbor
-pkgver=1.0.0
+_tag=v51.0.0-beta.1
+pkgver=51.0.0beta1
 pkgrel=1
 pkgdesc="See where your disk space grows — a disk usage analyzer"
 arch=('x86_64' 'aarch64')
@@ -9,22 +11,22 @@ url="https://github.com/hakergeniusz/arbor"
 license=('MIT')
 depends=('gtk4>=4.10' 'libadwaita>=1.8')
 makedepends=('cargo')
-source=("$pkgname-$pkgver.tar.gz::https://github.com/hakergeniusz/arbor/archive/refs/tags/v$pkgver.tar.gz")
+source=("$pkgname-$_tag.tar.gz::https://github.com/hakergeniusz/arbor/archive/refs/tags/$_tag.tar.gz")
 sha256sums=('SKIP')  # replace with the tag's checksum at release time
 options=('!lto')
 
 build() {
-  cd "$pkgname-$pkgver"
-  cargo build --release --locked --offline
+  cd "$pkgname-$_tag"
+  cargo build --release --locked
 }
 
 check() {
-  cd "$pkgname-$pkgver"
-  cargo test --locked --offline
+  cd "$pkgname-$_tag"
+  cargo test --locked
 }
 
 package() {
-  cd "$pkgname-$pkgver"
+  cd "$pkgname-$_tag"
   install -D -m 755 target/release/arbor "$pkgdir/usr/bin/arbor"
   install -D -m 644 data/io.github.hakergeniusz.Arbor.desktop.in \
     "$pkgdir/usr/share/applications/io.github.hakergeniusz.Arbor.desktop"

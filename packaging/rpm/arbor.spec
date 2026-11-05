@@ -1,11 +1,12 @@
 # Spec file for arbor — build with: rpmbuild -ba packaging/rpm/arbor.spec
+# (or packaging/scripts/build-rpm.sh, which drives a fedora container)
 Name:           arbor
-Version:        1.0.0
-Release:        1%{?dist}
+Version:        51.0.0
+Release:        0.1.beta1%{?dist}
 Summary:        See where your disk space grows — a disk usage analyzer
 License:        MIT
 URL:            https://github.com/hakergeniusz/arbor
-Source0:        %{url}/archive/refs/tags/v%{version}/arbor-%{version}.tar.gz
+Source0:        %{url}/archive/refs/tags/v51.0.0-beta.1.tar.gz
 
 # rust tier-1: covers x86_64 and aarch64
 ExclusiveArch:  %{rust_tier1_arches}
@@ -30,10 +31,10 @@ code.}
 %{_description}
 
 %prep
-%autosetup -n %{name}-%{version}
+%autosetup -n arbor-v51.0.0-beta.1
 
 %build
-cargo build --release --locked --offline
+cargo build --release --locked
 
 %install
 install -D -m 755 target/release/arbor %{buildroot}%{_bindir}/arbor
@@ -45,7 +46,7 @@ install -D -m 644 data/icons/scalable/apps/io.github.hakergeniusz.Arbor.svg \
     %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/io.github.hakergeniusz.Arbor.svg
 
 %check
-cargo test --locked --offline
+cargo test --locked
 
 %files
 %license LICENSE
@@ -56,5 +57,8 @@ cargo test --locked --offline
 %{_datadir}/icons/hicolor/scalable/apps/io.github.hakergeniusz.Arbor.svg
 
 %changelog
+* Wed Nov 05 2026 hakergeniusz <hakergeniusz@users.noreply.github.com> - 51.0.0-0.1.beta1
+- First public beta (clean-room implementation of the Arbor behavioral
+  specification; see docs/ for the specification and provenance).
 * Wed Nov 04 2026 hakergeniusz <hakergeniusz@users.noreply.github.com> - 1.0.0-1
 - Initial package

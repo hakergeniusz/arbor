@@ -5,3 +5,6 @@
 
 # Rust build artifacts
 /target/
+
+# Release artifacts (dist/) are built, not committed
+/dist/

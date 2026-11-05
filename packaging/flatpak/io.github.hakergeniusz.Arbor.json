@@ -1,7 +1,7 @@
 {
     "id": "io.github.hakergeniusz.Arbor",
     "runtime": "org.gnome.Platform",
-    "runtime-version": "50",
+    "runtime-version": "51",
     "sdk": "org.gnome.Sdk",
     "sdk-extensions": [
         "org.freedesktop.Sdk.Extension.rust-stable"
@@ -30,7 +30,7 @@
             "buildsystem": "simple",
             "build-commands": [
                 "cargo --version",
-                "cargo build --release --locked --offline",
+                "cargo build --release --locked",
                 "install -D -m 755 target-flatpak/release/arbor /app/bin/arbor",
                 "install -D -m 644 data/io.github.hakergeniusz.Arbor.desktop.in /app/share/applications/io.github.hakergeniusz.Arbor.desktop",
                 "install -D -m 644 data/io.github.hakergeniusz.Arbor.metainfo.xml /app/share/metainfo/io.github.hakergeniusz.Arbor.metainfo.xml",
@@ -40,16 +40,16 @@
                 {
                     "type": "git",
                     "url": "https://github.com/hakergeniusz/arbor",
-                    "tag": "v1.0.0",
-                    "commit": "PLACEHOLDER-SET-AT-RELEASE"
+                    "tag": "v51.0.0-beta.1",
+                    "x-comment": "Pin 'commit' to the tag's hash to protect against tag moves."
                 },
                 {
                     "type": "archive",
-                    "url": "https://github.com/hakergeniusz/arbor/releases/download/v1.0.0/arbor-vendor-1.0.0.tar.xz",
+                    "url": "https://github.com/hakergeniusz/arbor/releases/download/v51.0.0-beta.1/arbor-vendor-51.0.0-beta.1.tar.xz",
                     "destination": "vendor",
                     "skip-arches": [],
                     "disabled": true,
-                    "x-comment": "Alternative: ship a vendored cargo registry archive and add '--offline --frozen' with CARGO_HOME pointed at vendor/. The git+offline layout above requires a cargo registry mirror; prefer the vendored archive at release time."
+                    "x-comment": "Offline alternative: publish a vendored cargo registry archive and switch the build-commands to '--offline --frozen' with CARGO_HOME pointed at vendor/. The default build fetches crates.io directly, which flatpak-builder's build sandbox permits."
                 }
             ],
             "x-notes": "The scanner reads arbitrary host paths (filesystem=host) and moves items to the host XDG Trash via gio File::trash; trash confirmation (docs/06) is enforced in-process and cannot be bypassed by the sandbox."
