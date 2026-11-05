@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.hakergeniusz.Arbor</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Arbor</name>
+  <summary>See where your disk space grows</summary>
+  <description>
+    <p>
+      Arbor is a disk usage analyzer: it scans folders and shows where space
+      goes, as a folder tree with sizes and as rings/treemap visualizations.
+      Folders can be opened, their path copied, and items moved to the Trash
+      with a mandatory confirmation and an undo.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.hakergeniusz.Arbor.desktop</launchable>
+  <url type="homepage">https://github.com/hakergeniusz/arbor</url>
+  <url type="bugtracker">https://github.com/hakergeniusz/arbor/issues</url>
+  <developer_name>hakergeniusz</developer_name>
+  <update_contact>hakergeniusz@users.noreply.github.com</update_contact>
+  <categories>
+    <category>System</category>
+    <category>FileTools</category>
+    <category>Utility</category>
+  </categories>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="51.0.0-beta.1" date="2026-11-05">
+      <description>
+        <p>First public beta, versioned after the GNOME 51 cycle it targets:
+        start-page disc glyphs centered, denser folder list, scan progress
+        bar, on-disk scan cache, chart pane toggle, native packages and a
+        Flatpak bundle.</p>
+      </description>
+    </release>
+    <release version="1.0.0" date="2026-11-04">
+      <description>
+        <p>First release: scanning, rings and treemap views, folder
+        navigation, sorting, context-menu actions with mandatory trash
+        confirmation and undo, keyboard and screen-reader support.</p>
+      </description>
+    </release>
+  </releases>
+  <provides>
+    <binary>arbor</binary>
+  </provides>
+</component>

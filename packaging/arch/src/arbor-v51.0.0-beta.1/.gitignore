@@ -1,0 +1,10 @@
+# Local scratch, editor and OS droppings — observation fixtures live in /tmp, not here
+*.swp
+*~
+.DS_Store
+
+# Rust build artifacts
+/target/
+
+# Release artifacts (dist/) are built, not committed
+/dist/

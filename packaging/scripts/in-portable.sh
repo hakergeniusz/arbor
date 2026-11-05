@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs INSIDE debian:trixie (driven by build-portable.sh): compile the
+# Runs INSIDE ubuntu:25.10 (driven by build-portable.sh): compile the
 # release binary and pack the portable archive.
 set -euxo pipefail
 tag="$1"

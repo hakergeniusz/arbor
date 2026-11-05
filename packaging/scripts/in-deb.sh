@@ -4,7 +4,7 @@
 # binary, stage the package tree and build the .deb with dpkg-deb.
 set -euxo pipefail
 tag="$1"
-ver="${tag#v}"; debver="${ver//-/~}"          # 51.0.0-beta.1 -> 51.0.0~beta.1
+ver="${tag#v}"; debver="$(printf '%s' "$ver" | tr - '~')"   # 51.0.0-beta.1 -> 51.0.0~beta.1 (a literal ~ in ${//-/~} tilde-expands to $HOME!)
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y --no-install-recommends \

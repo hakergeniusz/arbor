@@ -34,8 +34,9 @@ dpkg-buildpackage -us -uc -b
 ```
 
 Produces `../arbor_51.0.0~beta.1-1_<arch>.deb`. `Architecture: any` — builds
-on `amd64` and `arm64`; runtime requires Ubuntu 24.10+/Debian trixie (GTK 4
-and libadwaita versions).
+on `amd64` and `arm64`. The released .deb is built against Ubuntu 25.10's
+stack (libadwaita 1.9), so it needs Ubuntu 25.10+ / Debian sid-or-newer at
+runtime; the package's Depends carry the exact floors of the build image.
 
 ## RPM
 
