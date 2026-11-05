@@ -120,6 +120,16 @@ impl DisplayNode {
         self.measured = true;
     }
 
+    /// Every path in this subtree including `self` — used to pre-fill the
+    /// merge duplicate-guard when a cached snapshot is restored (the refresh
+    /// scan must treat already-known paths as duplicates).
+    pub fn collect_paths(&self, out: &mut HashSet<PathBuf>) {
+        out.insert(self.path.clone());
+        for child in &self.children {
+            child.collect_paths(out);
+        }
+    }
+
     /// Remove the node at `path` from the tree and recompute every
     /// ancestor's aggregates (docs/06 R8: fresh totals after a trash
     /// operation). Returns the detached node.

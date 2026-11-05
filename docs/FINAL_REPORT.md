@@ -7,9 +7,9 @@ and what is **not done** — no claims beyond that.
 
 - Head: this commit (branch `implementer/arbor`, pushed to
   https://github.com/hakergeniusz/arbor — private), version 1.0.0
-- Test suite: **34 tests, 0 failures** (21 unit + 13 scanner-integration)
-- GUI evidence: ~160 screenshots from the hermetic Xvfb session
-  (`/tmp/arbor-gui/shots/01…189`, referenced below as S###/A#–A# from
+- Test suite: **38 tests, 0 failures** (24 unit + 14 scanner-integration)
+- GUI evidence: ~200 screenshots from the hermetic Xvfb session
+  (`/tmp/arbor-gui/shots/01…206`, referenced below as S###/A#–A# from
   `docs/09-test-scenarios.md`)
 - Clean-room rules honored throughout: no Baobab source, no `tools/`
   inspection/execution, `/usr/bin/baobab` never launched.
@@ -36,6 +36,10 @@ and what is **not done** — no claims beyond that.
 ### 2.1 Scanning (docs/03)
 - Async scan on a worker thread with progress events; UI fills
   progressively mid-scan; totals grow live (observed in GUI, Phase 3).
+- **Scan progress bar** (user request beyond the spec): a pulsing bar with
+  live counters ("N items · X scanned") slides in under the infobar while a
+  scan runs — visible regardless of the chart setting — and hides itself on
+  finish/failure/cancel (shots 191, 194–197, 205).
 - Snapshot semantics: the finished scan is one immutable tree; mid-scan
   changes appear only after rescan (S14).
 - Hidden files included; **symlinks excluded, cycle-safe** (unit tests
@@ -54,7 +58,11 @@ and what is **not done** — no claims beyond that.
   row2 → … → Main Menu → wrap, S26/S27).
 - Back button and location row return to the start page / parent folder.
 - Recents recorded on navigation; **Clear Recent List works immediately**
-  without confirmation (S25, screenshots 69/70).
+  without confirmation (S25, screenshots 69/70). Mount-root scans display
+  correctly (fixed in the fourth round): a recent for `/` used to render a
+  degenerate row titled "/" with the same "/" subtitle (a scan root has no
+  basename); recents now use the volume/device name for mount roots, so the
+  row reads "nvme0n1p2 — /" (shot 190).
 
 ### 2.3 Result view (docs/04/10)
 - Header per docs/10 §2: `[‹ Back] [wide centered breadcrumb pill] [↻]
@@ -200,6 +208,32 @@ The usage-bar suspicion from the user's screenshot was measured and
 **cleared**: fill = 413/526 px = 78.5% for a 78.7%-used disk — the bar, its
 label and the spec all agree; the start page matches the reference
 structure exactly (docs/01 §1–2, docs/10 state 7).
+
+### 2.10 Fourth round (2026-11-05, shots 190–206): the "/" row, progress bar, scan cache
+User report (screenshot): after scanning the root filesystem the start page
+showed a degenerate recent row **"/" with subtitle "/"** — fixed via
+mount-name display names (above). Two user requests implemented:
+- **Scan progress bar** — pulsing bar + live "N items · X scanned" counters
+  under the infobar while scanning, hidden on finish/fail/cancel. Verified
+  on a real root-filesystem scan (1,099,953 items / 129.1 GB): counters
+  climbed live (3567 · 51.6 MB → 1 090 212 · 121.8 GB → done), the bar hid
+  itself at Finished, and AT-SPI pings stayed at 0.13–0.21 s throughout.
+- **Scan cache** (Preferences switch "Cache scan results", persisted,
+  default on): every finished scan streams one flat record per entry to
+  `$XDG_CACHE_HOME/arbor/scans/` **from the worker thread** (no main-loop
+  cost, no tree clone); re-opening a folder restores the snapshot instantly
+  (files ≤ 250k nodes decode inline, bigger ones on a worker behind the
+  "Loading cached scan…" spinner) and a live rescan immediately refreshes
+  it — a `DirListed` for an already-measured (cache-loaded) directory
+  replaces its stale children, so entries deleted since the snapshot
+  disappear, and pruned folders show the honest amber "unmeasured" state
+  until their fresh aggregates arrive. Verified end-to-end on the root
+  scan: re-open restored the view instantly from the 57 MB snapshot,
+  the refresh converged back to exactly 129.1 GB / 1,099,953 items with
+  rings redrawn and the bar auto-hidden (shots 198–206), including across
+  an application restart. Unit-tested: record/decode roundtrip with
+  finalized aggregates, garbage/foreign-path rejection, `collect_paths`,
+  and a real cached-scan roundtrip through `spawn_ext`.
 
 ## 3. Implemented, partially verified
 

@@ -513,3 +513,72 @@ fn merge_entries_is_idempotent_per_path() {
     assert_eq!(node.size, 30);
     assert_eq!(node.children.len(), 3);
 }
+
+/// The cache writer runs inside the scan worker: a scan with caching enabled
+/// must leave a loadable snapshot whose tree matches what the UI merged
+/// (user request "add caching").
+#[test]
+fn cached_scan_roundtrips_through_a_real_scan() {
+    let dir = temp_dir("cache-roundtrip");
+    let sub = dir.join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    fs::write(dir.join("big.bin"), vec![0u8; 10_000]).unwrap();
+    fs::write(sub.join("note.txt"), b"hello").unwrap();
+
+    // Ground truth via a normal (uncached) scan merge.
+    let updates = collect_updates(&dir);
+    assert!(updates
+        .iter()
+        .any(|u| matches!(u, ScanUpdate::Finished { .. })));
+
+    // Cached scan of the same tree.
+    let (handle, rx) = arbor::scanner::spawn_ext(&dir, false, vec![], true);
+    let mut finished = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(ScanUpdate::Finished { .. }) => {
+                finished = true;
+                break;
+            }
+            Ok(_) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    assert!(finished, "cached scan never finished");
+    drop(handle); // join the worker so the cache file is finalized
+
+    let cached = arbor::cache::load(&dir).expect("cache snapshot must be loadable");
+    let root = &cached.root;
+    assert_eq!(root.path, dir);
+    // root = own dir block + big.bin (10 kB → blocks) + sub subtree
+    let big = node_contribution(10_000, 24); // 10_000 bytes → 20 blocks… actual st_blocks may differ
+    let _ = big;
+    assert_eq!(root.children.len(), 2, "big.bin + sub");
+    let sub_node = root
+        .children
+        .iter()
+        .find(|c| c.is_dir)
+        .expect("sub directory");
+    assert_eq!(sub_node.children.len(), 1);
+    assert_eq!(sub_node.children[0].name, "note.txt");
+    assert!(root.measured && sub_node.measured);
+    // Aggregates were finalized bottom-up by the decoder.
+    assert_eq!(root.size, root.own_size + sub_node.size + root.children.iter().find(|c| !c.is_dir).unwrap().size);
+    // Every path must be reachable via find(), like in a merged UI tree.
+    assert!(root.find(&sub.join("note.txt")).is_some());
+    assert!(root.find(&dir.join("big.bin")).is_some());
+
+    // The stale-children refresh rule the UI applies on DirListed for a
+    // measured (cache-loaded) directory.
+    let mut known = std::collections::HashSet::new();
+    root.collect_paths(&mut known);
+    assert_eq!(known.len(), 4); // root, big.bin, sub, note.txt
+
+    fs::remove_dir_all(&dir).ok();
+}

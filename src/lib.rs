@@ -2,6 +2,7 @@
 //! integration testing; the binary is a thin wrapper around `app::run`.
 
 pub mod app;
+pub mod cache;
 pub mod format;
 pub mod models;
 pub mod mounts;

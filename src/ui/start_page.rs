@@ -110,10 +110,7 @@ impl StartPage {
         for path in settings.borrow().recents.clone() {
             let path = std::path::PathBuf::from(path);
             locations.push(StartLocation::Recent(path.clone()));
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| path.display().to_string());
+            let name = recent_display_name(&path);
             self.list.append(&location_row(
                 "folder-symbolic",
                 &name,
@@ -123,6 +120,21 @@ impl StartPage {
 
         *self.locations.borrow_mut() = locations;
     }
+}
+
+/// Display name of a recent row: mount roots show their volume/device name —
+/// `path.file_name()` is None for `/`, which rendered a degenerate row titled
+/// "/" with the same subtitle (third-round user report) — everything else
+/// keeps its basename, matching the reference rows (docs/01 §2).
+fn recent_display_name(path: &std::path::Path) -> String {
+    for mount in mounts::list_mounts() {
+        if mount.root == path {
+            return mount.name;
+        }
+    }
+    path.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 /// A plain location row: disc icon, title, path subtitle, chevron.

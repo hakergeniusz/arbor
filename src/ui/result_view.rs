@@ -25,6 +25,9 @@ pub struct ResultView {
     pub column_view: gtk::ColumnView,
     pub store: gio::ListStore,
     pub selection: gtk::SingleSelection,
+    progress_reveal: gtk::Revealer,
+    progress_bar: gtk::ProgressBar,
+    progress_label: gtk::Label,
     chart_area: gtk::Box,
     pub chart_stack: gtk::Stack,
     pub spinner: gtk::Spinner,
@@ -55,6 +58,29 @@ impl ResultView {
         info_label.set_markup("<b>Files may take more space than shown</b>");
         infobar.append(&info_label);
         root.append(&infobar);
+
+        // Scan progress (user request): a pulsing bar with live counters,
+        // shown between the infobar and the panes while a scan runs —
+        // visible regardless of the chart-pane setting.
+        let progress_reveal = gtk::Revealer::new();
+        progress_reveal.set_transition_type(gtk::RevealerTransitionType::SlideDown);
+        let progress_box = gtk::Box::new(Orientation::Horizontal, 12);
+        progress_box.set_margin_top(6);
+        progress_box.set_margin_bottom(6);
+        progress_box.set_margin_start(12);
+        progress_box.set_margin_end(12);
+        let progress_bar = gtk::ProgressBar::new();
+        progress_bar.set_hexpand(true);
+        progress_bar.set_pulse_step(0.12);
+        progress_bar.add_css_class("scan-progress");
+        let progress_label = gtk::Label::new(None);
+        progress_label.set_halign(Align::End);
+        progress_label.add_css_class("dim-label");
+        progress_label.add_css_class("caption");
+        progress_box.append(&progress_bar);
+        progress_box.append(&progress_label);
+        progress_reveal.set_child(Some(&progress_box));
+        root.append(&progress_reveal);
 
         let paned = gtk::Paned::new(Orientation::Horizontal);
         paned.set_position(480); // ≈50/50 at the 960×600 default; fluid on resize
@@ -142,6 +168,9 @@ impl ResultView {
             column_view,
             store,
             selection,
+            progress_reveal,
+            progress_bar,
+            progress_label,
             chart_area,
             chart_stack,
             spinner,
@@ -170,6 +199,18 @@ impl ResultView {
             self.spinner.start();
         } else {
             self.spinner.stop();
+        }
+    }
+
+    /// Show/hide the scan progress bar and pulse it while active. `text`
+    /// carries the live counters (None keeps the current label).
+    pub fn set_scan_progress(&self, active: bool, text: Option<&str>) {
+        self.progress_reveal.set_reveal_child(active);
+        if active {
+            self.progress_bar.pulse();
+        }
+        if let Some(t) = text {
+            self.progress_label.set_text(t);
         }
     }
 
@@ -261,10 +302,10 @@ fn folder_factory(row_context_cb: Rc<RefCell<Option<RowContextCb>>>) -> gtk::Sig
             expander.connect_clicked(move |_| {
                 let Some(row) = item.item().and_downcast::<ScanRow>() else { return };
                 if row.is_location() {
-                    expander_btn.activate_action("win.navigate-up", None);
+                    let _ = expander_btn.activate_action("win.navigate-up", None);
                 } else {
                     let param = row.path().to_variant();
-                    expander_btn.activate_action("win.toggle-expand", Some(&param));
+                    let _ = expander_btn.activate_action("win.toggle-expand", Some(&param));
                 }
             });
         }

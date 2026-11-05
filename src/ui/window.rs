@@ -34,6 +34,21 @@ enum SortKey {
     Modified,
 }
 
+/// Result of a cache lookup for a folder about to be opened.
+enum CacheLoad {
+    /// No usable snapshot — scan from scratch.
+    None,
+    /// Snapshot decoded and ready to install.
+    Ready(crate::cache::CachedScan),
+    /// Snapshot exists but is big; the worker decodes it and delivers the
+    /// outcome over this channel (Some = decoded, None = unusable).
+    Pending(std::sync::mpsc::Receiver<Option<crate::cache::CachedScan>>),
+}
+
+/// Trees up to this many nodes decode synchronously on the open path
+/// (sub-100 ms); bigger snapshots decode on a worker behind the spinner.
+const CACHE_SYNC_DECODE_NODES: u32 = 250_000;
+
 pub struct ArborUi {
     pub window: adw::ApplicationWindow,
     toast_overlay: adw::ToastOverlay,
@@ -86,6 +101,12 @@ struct WindowState {
     /// Last chart update — charts clone the visible subtree, so while
     /// scanning they refresh at most 2×/s.
     last_chart: Cell<std::time::Instant>,
+    /// Cached snapshot decode in flight (big trees), with its channel.
+    pending_cache: Option<std::sync::mpsc::Receiver<Option<crate::cache::CachedScan>>>,
+    /// Entries merged so far in the running scan (progress counters).
+    scan_entries: u64,
+    /// Own bytes seen so far in the running scan (progress counters).
+    scan_bytes: u64,
     /// Bumped on every tree mutation (scan merges, measured aggregates,
     /// trash detach) — invalidates the chart projection caches.
     tree_gen: u64,
@@ -207,6 +228,9 @@ impl ArborUi {
                 select_largest: false,
                 last_repaint: Cell::new(std::time::Instant::now()),
                 last_chart: Cell::new(std::time::Instant::now()),
+                pending_cache: None,
+                scan_entries: 0,
+                scan_bytes: 0,
                 tree_gen: 0,
                 rings_cache: None,
                 treemap_cache: None,
@@ -584,6 +608,9 @@ impl ArborUi {
     }
 
     /// Open (scan) a folder, switching to the result view (docs/03 §1).
+    /// With the scan cache enabled (user request), a previously finished
+    /// scan of this folder is restored instantly and refreshed by a live
+    /// rescan; otherwise the folder is scanned from scratch.
     pub fn open_location(self: &Rc<Self>, path: &Path) {
         if !path.is_dir() {
             self.toast(&format!("“{}” is not a valid folder", path.display()));
@@ -592,22 +619,66 @@ impl ArborUi {
 
         // A new scan replaces any running one; partial data is freed (D5).
         self.cancel_scan();
-        {
-            let mut state = self.state.borrow_mut();
-            state.current = Some(path.to_path_buf());
-            state.current_folder = path.to_path_buf();
-            state.tree = None;
-            state.known.clear();
-            state.expanded.clear();
-            state.pending_autoselect = true;
-            // Fresh tree — stale projections from the previous scan are gone.
-            state.rings_cache = None;
-            state.treemap_cache = None;
-        }
+        self.prepare_result_view(path);
 
-        // Header state (docs/01 §3): Back + Rescan appear, the Main Menu
-        // button does not — the result-view header is
-        // [‹ Back] [pill] [↻] [window controls] (docs/10 §2).
+        let cached = if self.settings.borrow().cache_scans {
+            self.load_cached(path)
+        } else {
+            CacheLoad::None
+        };
+        match cached {
+            CacheLoad::None => self.start_scan(path, false),
+            CacheLoad::Ready(snapshot) => {
+                self.install_cached(path, snapshot);
+                self.start_scan(path, true);
+            }
+            CacheLoad::Pending(receiver) => {
+                // Big snapshot: decode on the worker, spinner meanwhile.
+                self.result_view.show_page("spinner");
+                self.result_view
+                    .set_scan_progress(true, Some("Loading cached scan…"));
+                self.state.borrow_mut().pending_cache = Some(receiver);
+                let ui = self.clone();
+                let path = path.to_path_buf();
+                glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
+                    let outcome = {
+                        let mut state = ui.state.borrow_mut();
+                        let Some(receiver) = state.pending_cache.as_mut() else {
+                            return glib::ControlFlow::Break;
+                        };
+                        match receiver.try_recv() {
+                            Ok(delivered) => {
+                                state.pending_cache = None;
+                                Some(delivered)
+                            }
+                            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                drop(state);
+                                ui.result_view.set_scan_progress(true, None); // pulse
+                                return glib::ControlFlow::Continue;
+                            }
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                state.pending_cache = None;
+                                Some(None)
+                            }
+                        }
+                    };
+                    match outcome {
+                        Some(Some(snapshot)) => {
+                            ui.install_cached(&path, snapshot);
+                            ui.start_scan(&path, true);
+                        }
+                        _ => ui.start_scan(&path, false),
+                    }
+                    glib::ControlFlow::Break
+                });
+            }
+        }
+    }
+
+    /// Header/state shared by every path into the result view (docs/01 §3):
+    /// Back + Rescan appear, the Main Menu button does not — the header is
+    /// [‹ Back] [pill] [↻] [window controls] (docs/10 §2).
+    fn prepare_result_view(self: &Rc<Self>, path: &Path) {
         self.back_btn.set_visible(true);
         self.rescan_btn.set_visible(true);
         self.menu_btn.set_visible(false);
@@ -620,15 +691,98 @@ impl ArborUi {
             "folder-symbolic"
         }));
         self.set_breadcrumb(&[path.to_path_buf()]);
-
         self.window.set_title(Some(&self.display_name(path)));
         self.stack.set_visible_child_name("result");
-        self.result_view.show_page("spinner");
-        self.result_view.set_rows(&[]);
+    }
+
+    /// Try to restore a cached snapshot for `path`. Small trees decode on
+    /// the spot; big ones (header node count above the threshold) decode on
+    /// a worker thread so the main loop never stalls on the restore.
+    fn load_cached(self: &Rc<Self>, path: &Path) -> CacheLoad {
+        let Some(snapshot) = crate::cache::peek(path) else {
+            return CacheLoad::None;
+        };
+        if snapshot.node_count <= CACHE_SYNC_DECODE_NODES {
+            match crate::cache::load(path) {
+                Some(snapshot) => CacheLoad::Ready(snapshot),
+                None => CacheLoad::None,
+            }
+        } else {
+            let probe = path.to_path_buf();
+            let (sender, receiver) = std::sync::mpsc::channel();
+            std::thread::Builder::new()
+                .name("arbor-cache-load".into())
+                .spawn(move || {
+                    let _ = sender.send(crate::cache::load(&probe));
+                })
+                .ok();
+            let _ = snapshot; // header info only; the worker re-reads the file
+            CacheLoad::Pending(receiver)
+        }
+    }
+
+    /// Install a restored snapshot as the displayed tree (the refresh scan
+    /// then brings it up to date; deleted entries are pruned by the
+    /// DirListed rule in `handle_scan_update`).
+    fn install_cached(&self, path: &Path, snapshot: crate::cache::CachedScan) {
+        let mut state = self.state.borrow_mut();
+        let mut root = snapshot.root;
+        // The cache stores the filesystem name; the UI tree uses the display
+        // name (e.g. "Home Folder"), exactly like a fresh scan's root.
+        root.name = self.display_name(path);
+        state.tree = Some(root);
+        state.current = Some(path.to_path_buf());
+        state.current_folder = path.to_path_buf();
+        state.rings_cache = None;
+        state.treemap_cache = None;
+        state.tree_gen += 1;
+    }
+
+    /// Spin up the scanner and its drain loop. `refresh` = a cached snapshot
+    /// is already installed: the tree survives (the merge is idempotent per
+    /// path) and the spinner page is skipped — the restored rows stay
+    /// visible while the rescan runs.
+    fn start_scan(self: &Rc<Self>, path: &Path, refresh: bool) {
+        {
+            let mut state = self.state.borrow_mut();
+            state.current = Some(path.to_path_buf());
+            state.current_folder = path.to_path_buf();
+            if !refresh {
+                state.tree = None;
+                state.known.clear();
+            } else {
+                // Pre-fill the duplicate guard from the snapshot so the
+                // refresh merge treats cached entries as known.
+                let mut known = HashSet::new();
+                if let Some(tree) = &state.tree {
+                    tree.collect_paths(&mut known);
+                }
+                state.known = known;
+            }
+            state.expanded.clear();
+            state.pending_autoselect = true;
+            state.scan_entries = 0;
+            state.scan_bytes = 0;
+            // Stale projections from the previous tree are gone.
+            state.rings_cache = None;
+            state.treemap_cache = None;
+        }
+
+        if refresh {
+            // Show the restored rows immediately; the rescan refines them.
+            self.rebuild_rows();
+            self.result_view
+                .set_scan_progress(true, Some("Rescanning…"));
+        } else {
+            self.result_view.show_page("spinner");
+            self.result_view.set_scan_progress(true, Some("Scanning…"));
+            self.result_view.set_rows(&[]);
+        }
 
         let ignored = self.settings.borrow().ignored.clone();
         let recursive = self.settings.borrow().recursive_mounts;
-        let (handle, receiver) = crate::scanner::spawn(path, recursive, ignored);
+        let cache = self.settings.borrow().cache_scans;
+        let (handle, receiver) = crate::scanner::spawn_ext(path, recursive, ignored, cache);
         self.state.borrow_mut().scan = Some(handle);
 
         // Drain scanner updates on the main loop (worker → UI bridge).
@@ -736,6 +890,41 @@ impl ArborUi {
                         }));
                         state.known.clear();
                     }
+                    // Progress counters (user-requested scan progress bar).
+                    state.scan_entries += entries.len() as u64;
+                    state.scan_bytes += entries.iter().map(|e| e.own_size).sum::<u64>();
+                    // Cache refresh: a listing for an already-measured
+                    // directory can only happen when the tree came from the
+                    // snapshot cache — its children are stale. Drop them
+                    // (and their known-paths) so the fresh listing replaces
+                    // them; entries deleted since the snapshot disappear.
+                    let parents: HashSet<&Path> = entries
+                        .iter()
+                        .filter_map(|e| e.path.parent())
+                        .collect();
+                    let WindowState { tree, known, .. } = &mut *state;
+                    if let Some(tree) = tree.as_mut() {
+                        for parent in parents {
+                            if let Some(node) = tree.find_mut(parent) {
+                                if node.is_dir && node.measured {
+                                    let mut subtree = HashSet::new();
+                                    node.collect_paths(&mut subtree);
+                                    for p in subtree {
+                                        known.remove(&p);
+                                    }
+                                    node.children.clear();
+                                    // Reset to a fresh-scan look: own data
+                                    // only, unmeasured (amber) until this
+                                    // folder's new DirMeasured arrives —
+                                    // finalize_from_children would wrongly
+                                    // flag the partial numbers as final.
+                                    node.size = node.own_size;
+                                    node.items = 1;
+                                    node.measured = false;
+                                }
+                            }
+                        }
+                    }
                     // Merge entries under their own parents (shared with the
                     // protocol tests).
                     let WindowState { tree, known, rows_dirty, tree_gen, .. } = &mut *state;
@@ -770,12 +959,14 @@ impl ArborUi {
                 // Completed scans enter the recents list (docs/03 §6).
                 self.settings.borrow_mut().push_recent(&root.display().to_string());
                 self.refresh_start_page();
+                self.result_view.set_scan_progress(false, None);
                 // Charts become visible first so the forced repaint below
                 // projects them (the projection is skipped while hidden).
                 self.show_chart_page();
                 self.repaint_rows(true);
             }
             ScanUpdate::Failed { path } => {
+                self.result_view.set_scan_progress(false, None);
                 self.cancel_scan();
                 self.show_start();
                 self.toast(&format!(
@@ -852,6 +1043,17 @@ impl ArborUi {
                 let mut state = self.state.borrow_mut();
                 state.rows_dirty = false;
                 state.last_repaint.set(now);
+            }
+            // Live scan progress (user request): pulse + counters while the
+            // worker streams updates.
+            if self.state.borrow().scan.is_some() {
+                let state = self.state.borrow();
+                let text = format!(
+                    "{} items · {} scanned",
+                    state.scan_entries,
+                    crate::format::size(state.scan_bytes)
+                );
+                self.result_view.set_scan_progress(true, Some(&text));
             }
             // Deferred autoselect: the row exists only after the rebuild.
             if self.state.borrow().select_largest {

@@ -31,6 +31,11 @@ pub struct Settings {
     /// Defaults to on; a missing field in an older state file keeps it on.
     #[serde(default = "default_true")]
     pub show_chart: bool,
+    /// Persist finished scans under the XDG cache so re-opening a folder
+    /// restores the previous result instantly (a live rescan refreshes it).
+    /// User request ("add caching"); defaults to on.
+    #[serde(default = "default_true")]
+    pub cache_scans: bool,
     /// Remembered window size; None → 960×600 default (docs/01 §1, D3).
     #[serde(default)]
     pub window_size: Option<WindowSize>,
@@ -47,6 +52,7 @@ impl Default for Settings {
             ignored: Vec::new(),
             recursive_mounts: false,
             show_chart: true,
+            cache_scans: true,
             window_size: None,
         }
     }

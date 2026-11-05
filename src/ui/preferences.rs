@@ -41,6 +41,31 @@ pub fn present(ui: &Rc<ArborUi>) {
     chart_group.add(&show_chart);
     page.add(&chart_group);
 
+    // Scan cache (user request): finished scans persist under the XDG cache
+    // so re-opening a folder restores the previous result instantly; a live
+    // rescan always refreshes it.
+    let cache_group = adw::PreferencesGroup::builder()
+        .title("Scanning")
+        .build();
+    let cache_scans = adw::SwitchRow::builder()
+        .title("Cache scan results")
+        .subtitle("Re-open recent folders instantly; they are refreshed automatically")
+        .active(ui.settings.borrow().cache_scans)
+        .build();
+    {
+        let ui = ui.clone();
+        let row = cache_scans.clone();
+        cache_scans.connect_active_notify(move |_| {
+            let on = row.is_active();
+            if ui.settings.borrow().cache_scans != on {
+                ui.settings.borrow_mut().cache_scans = on;
+                save_settings(&ui.settings.borrow());
+            }
+        });
+    }
+    cache_group.add(&cache_scans);
+    page.add(&cache_group);
+
     let group = adw::PreferencesGroup::builder()
         .title("Locations to Ignore")
         .description("Ignored locations are excluded from scans.")

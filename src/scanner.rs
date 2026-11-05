@@ -78,6 +78,17 @@ pub fn spawn(
     recursive_mounts: bool,
     ignored: Vec<String>,
 ) -> (ScanHandle, std::sync::mpsc::Receiver<ScanUpdate>) {
+    spawn_ext(path, recursive_mounts, ignored, false)
+}
+
+/// Like [`spawn`], with the on-disk scan cache enabled (the worker streams
+/// one record per entry to the cache file; the main loop never pays).
+pub fn spawn_ext(
+    path: &Path,
+    recursive_mounts: bool,
+    ignored: Vec<String>,
+    cache: bool,
+) -> (ScanHandle, std::sync::mpsc::Receiver<ScanUpdate>) {
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_worker = cancel.clone();
     let root = path.to_path_buf();
@@ -86,7 +97,7 @@ pub fn spawn(
     let thread = std::thread::Builder::new()
         .name("arbor-scanner".into())
         .spawn(move || {
-            run_scan(&root, recursive_mounts, ignored, cancel_worker, &sender);
+            run_scan(&root, recursive_mounts, ignored, cancel_worker, &sender, cache);
         })
         .expect("scanner thread");
 
@@ -169,8 +180,19 @@ fn run_scan(
     ignored: Vec<String>,
     cancel: Arc<AtomicBool>,
     sender: &std::sync::mpsc::Sender<ScanUpdate>,
+    cache: bool,
 ) {
     let mut emit = Emitter::new(sender.clone());
+    // Streaming cache writer (one flat record per lstat'ed entry, walk
+    // order) — the main loop never pays for encoding the tree.
+    let mut writer = if cache {
+        match std::fs::metadata(root) {
+            Ok(m) => crate::cache::Writer::create(root, m.mtime()),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
     let meta = match std::fs::metadata(root) {
         Ok(m) if m.is_dir() => m,
         _ => {
@@ -186,9 +208,13 @@ fn run_scan(
         dev: u64,
         own_size: u64,
         mtime: i64,
+        #[allow(dead_code)]
         children: Vec<DisplayNode>,
         child_contrib: u64,
         child_items: u64,
+        /// This directory's record index in the cache stream (parent index
+        /// for everything listed inside it).
+        record_index: Option<u32>,
         pending: std::vec::IntoIter<DirEntry>,
     }
 
@@ -204,6 +230,19 @@ fn run_scan(
     emit.list_now(entry_metas(&entries));
 
     let root_meta_size = node_contribution(meta.size(), meta.blocks());
+    let root_record = writer.as_mut().and_then(|w| {
+        w.record(
+            None,
+            &root
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| root.display().to_string()),
+            true,
+            false,
+            root_meta_size,
+            Some(meta.mtime()),
+        )
+    });
     let mut stack = vec![Frame {
         path: root.to_path_buf(),
         dev: meta.dev(),
@@ -212,6 +251,7 @@ fn run_scan(
         children: Vec::new(),
         child_contrib: 0,
         child_items: 0,
+        record_index: root_record,
         pending: entries
             .into_iter()
             .map(|(_, entry)| entry)
@@ -258,6 +298,9 @@ fn run_scan(
                     children: Vec::new(),
                 });
             } else {
+                if let Some(w) = writer.take() {
+                    w.finish();
+                }
                 emit.send(ScanUpdate::Finished {
                     root: frame.path,
                 });
@@ -284,6 +327,9 @@ fn run_scan(
                 Err(_) => {
                     // Unreadable directory: error row, own contribution only.
                     let own = node_contribution(meta.size(), meta.blocks());
+                    if let (Some(w), Some(parent_idx)) = (&mut writer, frame.record_index) {
+                        w.record(Some(parent_idx), &name, true, true, own, Some(meta.mtime()));
+                    }
                     emit.list(vec![EntryMeta {
                         name: name.clone(),
                         path: path.clone(),
@@ -304,6 +350,17 @@ fn run_scan(
                 }
                 Ok(entries) => {
                     emit.list(entry_metas(&entries));
+                    let dir_idx = match (&mut writer, frame.record_index) {
+                        (Some(w), Some(parent_idx)) => w.record(
+                            Some(parent_idx),
+                            &name,
+                            true,
+                            false,
+                            node_contribution(meta.size(), meta.blocks()),
+                            Some(meta.mtime()),
+                        ),
+                        _ => None,
+                    };
                     // The dir node's own contribution and item are accounted
                     // when its frame completes (below) — do not add them
                     // here, or they would be counted twice.
@@ -315,6 +372,7 @@ fn run_scan(
                         children: Vec::new(),
                         child_contrib: 0,
                         child_items: 0,
+                        record_index: dir_idx,
                         pending: entries
                             .into_iter()
                             .map(|(_, e)| e)
@@ -325,6 +383,9 @@ fn run_scan(
             }
         } else {
             let own = node_contribution(meta.size(), meta.blocks());
+            if let (Some(w), Some(parent_idx)) = (&mut writer, frame.record_index) {
+                w.record(Some(parent_idx), &name, false, false, own, Some(meta.mtime()));
+            }
             frame.child_contrib += own;
             frame.child_items += 1;
         }
