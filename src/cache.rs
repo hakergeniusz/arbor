@@ -294,6 +294,7 @@ pub fn load(root: &Path) -> Option<CachedScan> {
             mtime,
             measured: true,
             children: Vec::new(),
+            child_index: None,
         });
         child_lists.push(Vec::new());
         if parent != u32::MAX {
@@ -322,7 +323,7 @@ fn assemble(
     let mut node = slots.get_mut(idx).and_then(|s| s.take()).expect("assembled once");
     if child_lists.get(idx).is_some_and(|l| !l.is_empty()) {
         for &c in child_lists[idx].iter() {
-            node.children.push(assemble(slots, child_lists, c as usize));
+            node.push_child(assemble(slots, child_lists, c as usize));
         }
     }
     node

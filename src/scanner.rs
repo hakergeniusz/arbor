@@ -281,22 +281,10 @@ fn run_scan(
             if let Some(parent) = stack.last_mut() {
                 parent.child_contrib += size;
                 parent.child_items += items;
-                parent.children.push(DisplayNode {
-                    name: frame
-                        .path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| frame.path.display().to_string()),
-                    path: frame.path,
-                    is_dir: true,
-                    error: false,
-                    own_size: frame.own_size,
-                    size,
-                    items,
-                    mtime: Some(frame.mtime),
-                    measured: true,
-                    children: Vec::new(),
-                });
+                // No DisplayNode build here: the frame tree is never read
+                // (the UI merges the streamed updates instead), and building
+                // one per directory cost an allocation + push per directory
+                // on the worker.
             } else {
                 if let Some(w) = writer.take() {
                     w.finish();

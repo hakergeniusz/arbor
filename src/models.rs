@@ -7,7 +7,12 @@
 #![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+
+/// A folder starts indexing its children by name once it holds at least
+/// this many — below it a linear scan is cheaper than the hash machinery.
+const CHILD_INDEX_MIN: usize = 32;
 
 /// Metadata of one directory entry as reported by the scanner.
 #[derive(Debug, Clone)]
@@ -40,7 +45,15 @@ pub struct DisplayNode {
     /// False while the folder's subtree is still being measured.
     pub measured: bool,
     pub children: Vec<DisplayNode>,
+    /// Children keyed by their raw file name → index into `children`, so
+    /// path descents are O(depth) instead of a per-sibling `starts_with`
+    /// scan. Built once a folder crosses `CHILD_INDEX_MIN` children;
+    /// `None` = linear scan (small folders, or the index was dropped).
+    /// Only wide folders pay for the index, so its memory tracks the
+    /// directories that actually need it.
+    pub(crate) child_index: Option<HashMap<OsString, usize>>,
 }
+
 
 impl DisplayNode {
     pub fn new_dir(meta: &EntryMeta) -> Self {
@@ -55,6 +68,7 @@ impl DisplayNode {
             mtime: meta.mtime,
             measured: false,
             children: Vec::new(),
+            child_index: None,
         }
     }
 
@@ -70,6 +84,7 @@ impl DisplayNode {
             mtime: meta.mtime,
             measured: true,
             children: Vec::new(),
+            child_index: None,
         }
     }
 
@@ -83,34 +98,88 @@ impl DisplayNode {
         self.find_mut_impl(path)
     }
 
+    /// Append a child, maintaining the name index (built once the folder
+    /// crosses `CHILD_INDEX_MIN` children).
+    pub fn push_child(&mut self, child: DisplayNode) {
+        self.children.push(child);
+        let idx = self.children.len() - 1;
+        match &mut self.child_index {
+            Some(index) => {
+                if let Some(name) = self.children[idx].path.file_name() {
+                    index.insert(name.to_os_string(), idx);
+                }
+            }
+            None if self.children.len() >= CHILD_INDEX_MIN => self.build_child_index(),
+            None => {}
+        }
+    }
+
+    /// Drop all children (the cache-refresh prune path); the index goes
+    /// with them so a later merge rebuilds it from the fresh listing.
+    pub fn clear_children(&mut self) {
+        self.children.clear();
+        self.child_index = None;
+    }
+
+    fn build_child_index(&mut self) {
+        let mut index = HashMap::with_capacity(self.children.len());
+        for (i, child) in self.children.iter().enumerate() {
+            if let Some(name) = child.path.file_name() {
+                index.insert(name.to_os_string(), i);
+            }
+        }
+        self.child_index = Some(index);
+    }
+
+    fn child_by_name(&self, name: &std::ffi::OsStr) -> Option<&DisplayNode> {
+        if let Some(index) = &self.child_index {
+            return index.get(name).and_then(|&i| self.children.get(i));
+        }
+        self.children
+            .iter()
+            .find(|c| c.path.file_name().map_or(false, |n| n == name))
+    }
+
+    fn child_by_name_mut(&mut self, name: &std::ffi::OsStr) -> Option<&mut DisplayNode> {
+        let idx = match &self.child_index {
+            Some(index) => index.get(name).copied(),
+            None => self
+                .children
+                .iter()
+                .position(|c| c.path.file_name().map_or(false, |n| n == name)),
+        };
+        self.children.get_mut(idx?)
+    }
+
     fn find_impl(&self, path: &Path) -> Option<&DisplayNode> {
         if self.path == path {
             return Some(self);
         }
-        if !path.starts_with(&self.path) {
+        let Ok(rel) = path.strip_prefix(&self.path) else {
             return None;
+        };
+        let mut node = self;
+        for comp in rel.components() {
+            node = node.child_by_name(comp.as_os_str())?;
         }
-        for child in &self.children {
-            if let Some(found) = child.find_impl(path) {
-                return Some(found);
-            }
-        }
-        None
+        Some(node)
     }
 
     fn find_mut_impl(&mut self, path: &Path) -> Option<&mut DisplayNode> {
         if self.path == path {
             return Some(self);
         }
-        if !path.starts_with(&self.path) {
+        let Ok(rel) = path.strip_prefix(&self.path) else {
             return None;
-        }
-        for child in &mut self.children {
-            if let Some(found) = child.find_mut(path) {
-                return Some(found);
+        };
+        let mut node = self;
+        for comp in rel.components() {
+            match node.child_by_name_mut(comp.as_os_str()) {
+                Some(child) => node = child,
+                None => return None,
             }
         }
-        None
+        Some(node)
     }
 
     /// Finalize a folder's aggregates from the currently known children.
@@ -138,6 +207,9 @@ impl DisplayNode {
         let Some(parent) = self.find_mut(parent_path) else { return None };
         let idx = parent.children.iter().position(|c| c.path == path)?;
         let removed = parent.children.remove(idx);
+        // Later siblings shifted left; simplest correct fix is dropping the
+        // index (it rebuilds lazily when the folder crosses the threshold).
+        parent.child_index = None;
         // Recompute the whole ancestor chain from the remaining children.
         let mut ancestor = parent_path;
         loop {
@@ -162,14 +234,18 @@ impl DisplayNode {
     /// children, which made one flat directory of n entries cost O(n²) on
     /// the main loop and froze real home-folder scans; a hashed set keeps
     /// the merge O(1) per entry.
-    pub fn merge_entries(&mut self, entries: &[EntryMeta], known: &mut HashSet<PathBuf>) -> usize {
+    pub fn merge_entries(
+        &mut self,
+        entries: Vec<EntryMeta>,
+        known: &mut HashSet<PathBuf>,
+    ) -> usize {
         // Group by parent so a batch performs one root-to-parent walk per
         // directory, not one per entry — but keep the groups in
         // first-appearance order: a batch may contain a directory and its
         // own children, and the parent must be created first (the scanner
         // always lists a directory before listing it, so its entry precedes
         // its children's).
-        let mut groups: Vec<(PathBuf, Vec<&EntryMeta>)> = Vec::new();
+        let mut groups: Vec<(PathBuf, Vec<EntryMeta>)> = Vec::new();
         let mut group_index: HashMap<PathBuf, usize> = HashMap::new();
         for meta in entries {
             let Some(parent_path) = meta.path.parent() else { continue };
@@ -189,13 +265,37 @@ impl DisplayNode {
                     continue; // already known; DirMeasured refines it
                 }
                 let node = if meta.is_dir {
-                    DisplayNode::new_dir(meta)
+                    DisplayNode {
+                        name: meta.name, // moved: the entry is consumed
+                        path: meta.path.clone(),
+                        is_dir: true,
+                        error: meta.error,
+                        own_size: meta.own_size,
+                        size: meta.own_size,
+                        items: 1,
+                        mtime: meta.mtime,
+                        measured: false,
+                        children: Vec::new(),
+                        child_index: None,
+                    }
                 } else {
-                    DisplayNode::new_file(meta)
+                    DisplayNode {
+                        name: meta.name,
+                        path: meta.path.clone(),
+                        is_dir: false,
+                        error: false,
+                        own_size: meta.own_size,
+                        size: meta.own_size,
+                        items: 1,
+                        mtime: meta.mtime,
+                        measured: true,
+                        children: Vec::new(),
+                        child_index: None,
+                    }
                 };
                 parent.size += node.size;
                 parent.items += 1;
-                parent.children.push(node);
+                parent.push_child(node);
                 merged += 1;
             }
         }
@@ -236,21 +336,22 @@ impl DisplayNode {
 /// terminal node itself (its aggregate was assigned directly, so adding the
 /// correction there too would double it — this is exactly what broke when
 /// the scan root's own `DirMeasured` arrived). Exactly one child per level
-/// can contain `path`.
+/// can contain `path`; descents go through the child name index.
 fn add_delta_along(node: &mut DisplayNode, path: &Path, size_delta: u64) {
     if node.path == path {
         return;
     }
     node.size = node.size.saturating_add(size_delta);
-    for child in &mut node.children {
-        if child.path == path {
-            return;
-        }
-        if path.starts_with(&child.path) {
-            add_delta_along(child, path, size_delta);
-            return;
-        }
-    }
+    let Ok(rel) = path.strip_prefix(&node.path) else {
+        return;
+    };
+    let Some(first) = rel.components().next() else {
+        return;
+    };
+    let Some(child) = node.child_by_name_mut(first.as_os_str()) else {
+        return;
+    };
+    add_delta_along(child, path, size_delta);
 }
 
 /// Display size of a single node: larger of content length and block usage
@@ -275,6 +376,7 @@ mod tests {
             mtime: None,
             measured: true,
             children,
+            child_index: None,
         }
     }
 
@@ -290,6 +392,7 @@ mod tests {
             mtime: None,
             measured: true,
             children: Vec::new(),
+            child_index: None,
         }
     }
 

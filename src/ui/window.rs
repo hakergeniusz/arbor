@@ -932,7 +932,7 @@ impl ArborUi {
                                     for p in subtree {
                                         known.remove(&p);
                                     }
-                                    node.children.clear();
+                                    node.clear_children();
                                     // Reset to a fresh-scan look: own data
                                     // only, unmeasured (amber) until this
                                     // folder's new DirMeasured arrives —
@@ -946,11 +946,12 @@ impl ArborUi {
                         }
                     }
                     // Merge entries under their own parents (shared with the
-                    // protocol tests).
+                    // protocol tests). The batch is consumed: node names move
+                    // into the tree instead of being cloned per record.
                     let WindowState { tree, known, rows_dirty, tree_gen, .. } = &mut *state;
                     tree.as_mut()
                         .expect("tree was just created")
-                        .merge_entries(&entries, known);
+                        .merge_entries(entries, known);
                     // Repaint on the throttle in repaint_rows, not per event —
                     // a home-folder scan would otherwise rebuild O(rows) per
                     // directory and O(subtree) for the charts.

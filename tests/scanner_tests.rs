@@ -393,10 +393,13 @@ fn coalesced_stream_replays_to_the_final_tree() {
                         },
                     ));
                 }
-                let merged = tree.as_mut().unwrap().merge_entries(entries, &mut known);
+                let expected = entries.len();
+                let merged = tree
+                    .as_mut()
+                    .unwrap()
+                    .merge_entries(entries.clone(), &mut known);
                 assert_eq!(
-                    merged,
-                    entries.len(),
+                    merged, expected,
                     "every entry must find its parent when merged — \
                      a listing arrived before its parent's listing"
                 );
@@ -492,7 +495,7 @@ fn flat_directory_merges_in_linear_time() {
     // capped at 512 entries).
     let mut merged_total = 0;
     for chunk in entries.chunks(512) {
-        merged_total += tree.merge_entries(chunk, &mut known);
+        merged_total += tree.merge_entries(chunk.to_vec(), &mut known);
     }
     let elapsed = started.elapsed();
     assert_eq!(merged_total, n);
@@ -530,13 +533,92 @@ fn merge_entries_is_idempotent_per_path() {
     };
     let mut tree = arbor::models::DisplayNode::new_dir(&root_meta);
     let mut known = HashSet::new();
-    assert_eq!(tree.merge_entries(&entries, &mut known), 3);
+    assert_eq!(tree.merge_entries(entries.clone(), &mut known), 3);
     // Replay the identical listing: nothing new may be merged.
-    assert_eq!(tree.merge_entries(&entries, &mut known), 0);
+    assert_eq!(tree.merge_entries(entries.clone(), &mut known), 0);
     let node = tree.find(&parent).unwrap();
     assert_eq!(node.items, 4); // self + a + b + c
     assert_eq!(node.size, 30);
     assert_eq!(node.children.len(), 3);
+}
+
+/// The child name index (seventh-round perf work) must stay consistent
+/// across the cache-refresh prune — children cleared, then re-merged — and
+/// descents through a wide, re-listed folder must keep finding every path,
+/// including aggregates rolled up over the index by `apply_measured`.
+#[test]
+fn child_index_survives_prune_and_remerge() {
+    use std::collections::HashSet;
+
+    let parent: PathBuf = "/wide".into();
+    let top_meta = |i: usize| arbor::models::EntryMeta {
+        name: format!("d{i:03}"),
+        path: parent.join(format!("d{i:03}")),
+        is_dir: true,
+        error: false,
+        own_size: 0,
+        mtime: None,
+    };
+    let root_meta = arbor::models::EntryMeta {
+        name: "wide".into(),
+        path: parent.clone(),
+        is_dir: true,
+        error: false,
+        own_size: 0,
+        mtime: None,
+    };
+    let mut tree = arbor::models::DisplayNode::new_dir(&root_meta);
+    let mut known = HashSet::new();
+
+    // 100 directories > CHILD_INDEX_MIN (32): the index builds mid-merge.
+    let first: Vec<_> = (0..100).map(top_meta).collect();
+    assert_eq!(tree.merge_entries(first, &mut known), 100);
+    assert!(tree.find(&parent.join("d007")).is_some());
+
+    // Children under d007 (listed after its own entry, like the scanner).
+    let child_path = parent.join("d007");
+    let sub_meta = |name: &str| arbor::models::EntryMeta {
+        name: name.into(),
+        path: child_path.join(name),
+        is_dir: true,
+        error: false,
+        own_size: 0,
+        mtime: None,
+    };
+    let second: Vec<_> = (0..10).map(|i| sub_meta(&format!("old{i}"))).collect();
+    assert_eq!(tree.merge_entries(second, &mut known), 10);
+    assert!(tree.find(&child_path.join("old9")).is_some());
+
+    // Cache-refresh prune on d007: forget the stale subtree and clear it,
+    // exactly like the DirListed handler does for a measured folder.
+    let stale = {
+        let node = tree.find(&child_path).unwrap();
+        let mut subtree = HashSet::new();
+        node.collect_paths(&mut subtree);
+        subtree
+    };
+    {
+        let node = tree.find_mut(&child_path).unwrap();
+        node.clear_children();
+        node.size = node.own_size;
+        node.items = 1;
+        node.measured = false;
+    }
+    for p in &stale {
+        known.remove(p);
+    }
+
+    // Re-list 40 fresh children (> threshold): the index rebuilds and deep
+    // descents through it must find the new paths, not the stale ones.
+    let third: Vec<_> = (0..40).map(|i| sub_meta(&format!("new{i:02}"))).collect();
+    assert_eq!(tree.merge_entries(third, &mut known), 40);
+    assert!(tree.find(&child_path.join("new39")).is_some());
+    assert!(tree.find(&child_path.join("old9")).is_none());
+    assert!(tree.find(&parent.join("d050")).is_some());
+
+    // The measured aggregate rolls up through the re-indexed descent.
+    assert!(tree.apply_measured(&child_path, 999, 41, false, 0));
+    assert_eq!(tree.find(&parent).unwrap().size, 999);
 }
 
 /// The cache writer runs inside the scan worker: a scan with caching enabled
