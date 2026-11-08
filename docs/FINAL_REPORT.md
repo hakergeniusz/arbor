@@ -13,7 +13,9 @@ and what is **not done** — no claims beyond that.
   (`/tmp/arbor-gui/shots/01…224`, referenced below as S###/A#–A# from
   `docs/09-test-scenarios.md`)
 - Clean-room rules honored throughout: no Baobab source, no `tools/`
-  inspection/execution, `/usr/bin/baobab` never launched.
+  inspection/execution. `/usr/bin/baobab` was launched exactly once per
+  benchmark run as a **black box** (timing-only observation of its own
+  window, §2.14) — user-authorized for that comparison, still no source.
 
 ## 1. Method
 
@@ -316,6 +318,44 @@ spinner, and the cache file's mtime **unchanged** (no scan, no rewrite);
 after adding a file to the fixture the restore still shows the stale
 snapshot while Ctrl+R picks the new file up (28→29 items) and rewrites the
 cache (981→1020 B). 38 tests green (commit `9a2cd01`).
+
+### 2.14 Benchmark: Baobab 50.0 vs Arbor, cold and warm (2026-11-08)
+User request: *"So compare speed of baobab and arbor, both on cold and warm
+measuring."* Identical setup for both apps: hermetic Xvfb session (`env -i`,
+private dbus, fake HOME/XDG, no window manager), the same CLI argument (a
+fixture of 1250 dirs × 80 files = **101,251 items / 645.8 MB** on ext4),
+`GSK_RENDERER=cairo` (the Vulkan renderer stalls frame presents on
+Xvfb/llvmpipe — a harness artifact that froze *either* app mid-scan), a11y
+bridge disabled and no AT-SPI polling (16 Hz accessibility tree walks
+congest Baobab's main thread mid-scan — another harness artifact). Cold =
+page cache dropped via `sudo sync; echo 3 > /proc/sys/vm/drop_caches` plus
+Arbor's scan cache cleared; warm = immediately re-opening the same folder
+with everything hot. Timing from 4 fps x11grab recordings of the window
+region: completion = first frame that stays pixel-stable (4-level-quantized
+hash — ±2/255 cairo re-render noise) for 3 s, cross-checked by input-seeking
+probes against the recording's final frame (±0.25 s grid); Arbor-warm
+additionally by a dark-rect probe for the restore toast (wall-vs-file offset
+≈ +0.25 s, calibrated against the cold/warm frame events). Baobab strictly
+black box. Three runs per cell.
+
+| Scenario | Baobab 50.0 | Arbor | Arbor detail |
+|---|---|---|---|
+| **Cold open** (fresh scan) | 4.25 s (4.5 / 4.25 / 4.25) | 7.25 s (7.25 / 7.25 / 7.0) | scanner + cache write **done at 1.3 s** (1.27–1.36) |
+| **Warm open** (same folder again) | 3.25 s ×3 — full rescan from disk | **≈0.6–0.9 s** | cache restore, **no rescan** (cache mtime untouched in all 3 runs) |
+
+Reading:
+- Arbor's scanner is ~3× faster than Baobab's whole cold path — all 101k
+  items are measured and cached at 1.3 s vs 4.25 s — but the UI then ingests
+  the result incrementally (bounded 6 ms/tick drain, throttled repaints,
+  chart projection of 101k nodes) and only settles at ~7.25 s. The cold
+  tail is UI ingest, not scanning.
+- Warm, the §2.13 fix pays off: Arbor skips the scan entirely and shows the
+  restored snapshot in under a second — ~4–5× faster than Baobab, whose
+  warm open is the same full scan, merely page-cache-hot (3.25 vs 4.25 s).
+- Caveats: software rendering (llvmpipe) — absolute numbers are not
+  native-GPU numbers, the *ratios* are the comparable part; single-fixture
+  workload; "UI-complete" is strict (rows, rings and treemap all settled,
+  spinner gone). Recordings `rec-{fc,fw,gc,gw}{1..3}.mp4`.
 
 ## 3. Implemented, partially verified
 
