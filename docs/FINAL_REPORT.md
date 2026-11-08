@@ -331,31 +331,88 @@ congest Baobab's main thread mid-scan — another harness artifact). Cold =
 page cache dropped via `sudo sync; echo 3 > /proc/sys/vm/drop_caches` plus
 Arbor's scan cache cleared; warm = immediately re-opening the same folder
 with everything hot. Timing from 4 fps x11grab recordings of the window
-region: completion = first frame that stays pixel-stable (4-level-quantized
-hash — ±2/255 cairo re-render noise) for 3 s, cross-checked by input-seeking
-probes against the recording's final frame (±0.25 s grid); Arbor-warm
-additionally by a dark-rect probe for the restore toast (wall-vs-file offset
-≈ +0.25 s, calibrated against the cold/warm frame events). Baobab strictly
+region with a pairwise frame detector: the last frame pair 2 s apart (8
+frames at 4 fps) with a pixel diff > 8/255 among frames carrying real
+content (std > 15), wall = rec time + the 0.25 s launch calibration offset.
+An earlier frame-stability detector (4-level-quantized hash stable for 3 s,
+input-seeking probes against the final frame) over-reported every cell by
+~1–2 s — mp4 P-frame noise of ±4–6/255 defeats 4-level quantization, frames
+pushed after SIGKILL are black, and the final frame carries encoder-flush
+blips — so every number below (and in §2.15) is re-measured with the
+corrected detector on the same recordings. Arbor-warm is additionally
+cross-checked by a dark-rect probe for the restore toast. Baobab strictly
 black box. Three runs per cell.
 
-| Scenario | Baobab 50.0 | Arbor | Arbor detail |
+| Scenario | Baobab 50.0 | Arbor (before §2.15) | Arbor detail |
 |---|---|---|---|
-| **Cold open** (fresh scan) | 4.25 s (4.5 / 4.25 / 4.25) | 7.25 s (7.25 / 7.25 / 7.0) | scanner + cache write **done at 1.3 s** (1.27–1.36) |
-| **Warm open** (same folder again) | 3.25 s ×3 — full rescan from disk | **≈0.6–0.9 s** | cache restore, **no rescan** (cache mtime untouched in all 3 runs) |
+| **Cold open** (fresh scan) | 2.25 s (2.25 / 2.0 / 2.25) | 5.25 s (5.25 / 5.75 / 5.0) | scanner + cache write **done at 1.3 s** (1.27–1.36) |
+| **Warm open** (same folder again) | 1.0 s ×3 — full rescan from disk | **≈0.55–0.85 s** | cache restore, **no rescan** (cache mtime untouched in all 3 runs) |
 
 Reading:
-- Arbor's scanner is ~3× faster than Baobab's whole cold path — all 101k
-  items are measured and cached at 1.3 s vs 4.25 s — but the UI then ingests
-  the result incrementally (bounded 6 ms/tick drain, throttled repaints,
-  chart projection of 101k nodes) and only settles at ~7.25 s. The cold
-  tail is UI ingest, not scanning.
+- Arbor's scanner alone beats Baobab's whole cold path — all 101k items are
+  measured and cached at 1.3 s vs 2.25 s — but the UI then ingests the result
+  incrementally (bounded 6 ms/tick drain, throttled repaints, chart
+  projection of 101k nodes) and only settles at ~5.25 s. The cold tail is
+  UI ingest, not scanning; §2.15 profiles and removes it.
 - Warm, the §2.13 fix pays off: Arbor skips the scan entirely and shows the
-  restored snapshot in under a second — ~4–5× faster than Baobab, whose
-  warm open is the same full scan, merely page-cache-hot (3.25 vs 4.25 s).
+  restored snapshot in ~0.7 s, faster than Baobab, whose warm open is the
+  same full scan, merely page-cache-hot (1.0 vs 2.25 s).
 - Caveats: software rendering (llvmpipe) — absolute numbers are not
   native-GPU numbers, the *ratios* are the comparable part; single-fixture
   workload; "UI-complete" is strict (rows, rings and treemap all settled,
   spinner gone). Recordings `rec-{fc,fw,gc,gw}{1..3}.mp4`.
+
+### 2.15 Seventh round (2026-11-08): ingest optimization — cold settle 5.25 s → 1.75 s
+
+User request: *"So optimize it."* Target the §2.14 finding that Arbor's
+scanner finishes at ~1.3 s but the UI settles 4 s later. Temporary env-gated
+instrumentation (`ARBOR_DRAIN_DEBUG`, removed before commit) attributed the
+tail on the 101k fixture to ≈2.4 s of main-thread work delivered at a 37.5%
+duty cycle (6 ms of work per 16 ms timeout tick, running *above* the redraw
+priority):
+
+| Sink | Measured |
+|---|---|
+| Streaming repaint `set_rows` (28 × 52.5 ms) | **1470 ms** — dominant |
+| Drain merge work (2503 scan messages) | 561 ms |
+| Streaming repaint `build_rows` (28 × ~14 ms) | 393 ms |
+
+Two commits, no behavior change (120 ms repaint throttle, progressive fill,
+spinner, amber unmeasured rows, autoselect-all all preserved):
+
+- `perf(models)` (`5301080`): a per-`DisplayNode` child name index (built once
+  a folder crosses 32 children) makes path descents O(depth) instead of
+  O(siblings) — the fixture's 1250 root children made every `DirMeasured`
+  descent and every `merge_entries`/prune parent lookup walk ~625 siblings;
+  `merge_entries` consumes `EntryMeta` by value; the scanner's dead
+  per-directory `DisplayNode` build removed.
+- `perf(ui)` (`b163724`): the drain moved to `glib::idle_add_local`
+  (DEFAULT_IDLE sits below redraw/input, so it consumes only spare main-loop
+  time) with a 10 ms per-dispatch budget and a 16 ms one-shot re-arm timeout
+  for when data reappears; `set_rows` via `ListStore::splice` (one
+  `items_changed` per rebuild instead of 1252); one `now_local()` per rebuild
+  and decorate-sort-undecorate with cached keys in `emit_children`; settle
+  housekeeping (`list_mounts`, recents, start-page rebuild, the synchronous
+  settings write) deferred off the `Finished`/`install_cached` critical path
+  into a one-shot idle after the final paint.
+
+Result (same harness/fixture as §2.14, cold page cache, 3 runs per cell):
+
+| Scenario | Baobab 50.0 | Arbor before | Arbor after |
+|---|---|---|---|
+| **Cold open** | 2.25 s | 5.25 s | **1.75 s ×3** — now ahead of Baobab |
+| **Warm open** | 1.0 s ×3 | ≈0.55–0.85 s | **≤0.55 s ×3** (toast already present in the first probeable frame; negative `cache_done` deltas prove no rescan) |
+
+The scanner is unchanged (1.20–1.25 s cold) — the whole win is ingest.
+Mid-scan frames confirm progressive fill still streams (71,090 items visible
+at ~1.25 s vs 19,730 at the same point before the change) with the spinner
+animating, i.e. the idle drain does not starve rendering. The cancel path was
+re-verified on the new drain: Escape at 0.6 s on a cold run exits the scanner
+thread (1 → 0) with no panic, and the `.tree.tmp` leftover matches the
+documented cancel invariant (the writer is never `finish()`ed on cancel).
+39 tests green (24 unit + 15 integration), including a new
+`child_index_survives_prune_and_remerge` that replays the exact measure →
+prune → re-merge sequence the refresh path exercises on an indexed folder.
 
 ## 3. Implemented, partially verified
 
