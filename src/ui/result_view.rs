@@ -185,10 +185,11 @@ impl ResultView {
 
     /// Replace the flat row list (location row first, then children).
     pub fn set_rows(&self, rows: &[ScanRow]) {
-        self.store.remove_all();
-        for row in rows {
-            self.store.append(row);
-        }
+        // One splice = one items_changed: remove_all + per-row appends made
+        // the sort model and selection model process N+1 model updates per
+        // streaming repaint (measured 52 ms per rebuild on a 1250-row
+        // folder — more than the merge work itself).
+        self.store.splice(0, self.store.n_items(), rows);
         self.selection.set_selected(u32::MAX); // GTK_NO_SELECTION
     }
 

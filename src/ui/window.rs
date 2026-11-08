@@ -759,14 +759,6 @@ impl ArborUi {
             state.tree_gen += 1;
             state.expanded.clear();
         }
-        // Recents parity with a completed scan (docs/03 §6) — except mount
-        // roots and the home folder, as in `Finished` (no duplicate rows).
-        let is_permanent_row = path == glib::home_dir()
-            || crate::mounts::list_mounts().iter().any(|m| m.root == path);
-        if !is_permanent_row {
-            self.settings.borrow_mut().push_recent(&path.display().to_string());
-        }
-        self.refresh_start_page();
         self.result_view.set_scan_progress(false, None);
         self.rebuild_rows();
         self.show_chart_page();
@@ -775,6 +767,20 @@ impl ArborUi {
             "Restored scan from cache ({})",
             format_scanned_at(scanned_at)
         ));
+        // Recents parity with a completed scan (docs/03 §6) — except mount
+        // roots and the home folder, as in `Finished` (no duplicate rows) —
+        // deferred off the restore path like the settle housekeeping there.
+        let ui = self.clone();
+        let path = path.to_path_buf();
+        glib::idle_add_local(move || {
+            let is_permanent_row = path == glib::home_dir()
+                || crate::mounts::list_mounts().iter().any(|m| m.root == path);
+            if !is_permanent_row {
+                ui.settings.borrow_mut().push_recent(&path.display().to_string());
+            }
+            ui.refresh_start_page();
+            glib::ControlFlow::Break // one-shot housekeeping
+        });
     }
 
     /// Spin up the scanner and its drain loop, rebuilding the tree from
@@ -807,44 +813,19 @@ impl ArborUi {
 
         // Drain scanner updates on the main loop (worker → UI bridge).
         //
-        // Bounded per tick: a home-folder scan queues hundreds of thousands
-        // of updates, and draining them all inside one timeout callback
-        // starves the frame clock (the window manager starts showing
-        // "Not Responding"). Each tick spends at most ~6 ms merging updates;
-        // the list/charts repaint on a throttle in `repaint_rows`.
-        let ui = self.clone();
-        glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(6);
-            loop {
-                match receiver.try_recv() {
-                    Ok(update) => {
-                        let terminal = matches!(
-                            update,
-                            ScanUpdate::Finished { .. }
-                                | ScanUpdate::Failed { .. }
-                                | ScanUpdate::Cancelled
-                        );
-                        ui.handle_scan_update(update);
-                        if terminal {
-                            ui.repaint_rows(true);
-                            return glib::ControlFlow::Break;
-                        }
-                        if std::time::Instant::now() >= deadline {
-                            ui.repaint_rows(false);
-                            return glib::ControlFlow::Continue;
-                        }
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {
-                        ui.repaint_rows(false);
-                        return glib::ControlFlow::Continue;
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        ui.repaint_rows(true);
-                        return glib::ControlFlow::Break;
-                    }
-                }
-            }
-        });
+        // Scheduled at idle priority: glib dispatches input and frame-clock
+        // redraws first, so the pump only ever consumes the main loop's
+        // spare time, and the bounded per-dispatch budget keeps event
+        // latency at ~10 ms even while a home-folder scan queues hundreds
+        // of thousands of updates. Draining everything inside one callback
+        // starved the frame clock ("Not Responding"); a fixed 6-of-16 ms
+        // timeout instead left ~75% of the loop unused and stretched the
+        // same work over several seconds. When the queue runs dry the pump
+        // hands off to a cheap poll that re-arms it — no spinning while
+        // idle. Repaints throttle in `repaint_rows`.
+        let queue: Rc<RefCell<Option<std::sync::mpsc::Receiver<ScanUpdate>>>> =
+            Rc::new(RefCell::new(Some(receiver)));
+        arm_idle(self, &queue);
     }
 
     /// Navigate within the running/finished scan result (docs/02 §3).
@@ -977,23 +958,31 @@ impl ArborUi {
                     let mut state = self.state.borrow_mut();
                     state.scan = None;
                 }
-                // Completed scans enter the recents list (docs/03 §6) —
-                // except mount roots and the home folder: both have their
-                // own permanent rows in "This Device", and recording them
-                // produced a mismatched duplicate row (fourth-round user
-                // report: "nvme0n1p2" twice, once as a device, once as a
-                // bare folder row).
-                let is_permanent_row = root == glib::home_dir()
-                    || crate::mounts::list_mounts().iter().any(|m| m.root == root);
-                if !is_permanent_row {
-                    self.settings.borrow_mut().push_recent(&root.display().to_string());
-                }
-                self.refresh_start_page();
                 self.result_view.set_scan_progress(false, None);
                 // Charts become visible first so the forced repaint below
                 // projects them (the projection is skipped while hidden).
                 self.show_chart_page();
                 self.repaint_rows(true);
+                // Recents and the start-page rebuild (procfs/GIO mount
+                // queries, a synchronous settings write) run after the
+                // final paint — on the settle path they delayed the first
+                // complete view of the scan result.
+                let ui = self.clone();
+                glib::idle_add_local(move || {
+                    // Completed scans enter the recents list (docs/03 §6) —
+                    // except mount roots and the home folder: both have
+                    // their own permanent rows in "This Device", and
+                    // recording them produced a mismatched duplicate row
+                    // (fourth-round user report: "nvme0n1p2" twice, once as
+                    // a device, once as a bare folder row).
+                    let is_permanent_row = root == glib::home_dir()
+                        || crate::mounts::list_mounts().iter().any(|m| m.root == root);
+                    if !is_permanent_row {
+                        ui.settings.borrow_mut().push_recent(&root.display().to_string());
+                    }
+                    ui.refresh_start_page();
+                    glib::ControlFlow::Break // one-shot housekeeping
+                });
             }
             ScanUpdate::Failed { path } => {
                 self.result_view.set_scan_progress(false, None);
@@ -1034,7 +1023,9 @@ impl ArborUi {
             let state = self.state.borrow();
             let Some(tree) = &state.tree else { return };
             let Some(current) = tree.find(&state.current_folder) else { return };
-            build_rows(current, &state.expanded, state.sort)
+            let now = glib::DateTime::now_local()
+                .unwrap_or_else(|_| glib::DateTime::from_unix_local(0).unwrap());
+            build_rows(current, &state.expanded, state.sort, &now)
         };
         self.result_view.set_rows(&rows);
         self.update_charts();
@@ -1066,7 +1057,9 @@ impl ArborUi {
                 let state = self.state.borrow();
                 let Some(tree) = &state.tree else { return };
                 let Some(current) = tree.find(&state.current_folder) else { return };
-                build_rows(current, &state.expanded, state.sort)
+                let now = glib::DateTime::now_local()
+                    .unwrap_or_else(|_| glib::DateTime::from_unix_local(0).unwrap());
+                build_rows(current, &state.expanded, state.sort, &now)
             };
             self.result_view.set_rows(&rows);
             {
@@ -1465,20 +1458,108 @@ fn format_scanned_at(secs: u64) -> String {
         .unwrap_or_else(|_| "unknown time".into())
 }
 
+/// What the drain tick wants next from the scheduler.
+enum DrainFlow {
+    /// Keep this source attached (work remains).
+    Stay,
+    /// Queue ran dry: drop this source, poll instead.
+    Poll,
+    /// Terminal update seen; stop scheduling.
+    Done,
+}
+
+type ScanQueue = Rc<RefCell<Option<std::sync::mpsc::Receiver<ScanUpdate>>>>;
+
+/// Process scan updates for up to `DRAIN_BUDGET_MS` of wall time.
+fn drain_tick(ui: &Rc<ArborUi>, queue: &ScanQueue) -> DrainFlow {
+    const DRAIN_BUDGET_MS: u64 = 10;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(DRAIN_BUDGET_MS);
+    loop {
+        // Scope the RefCell guard so the queue can be cleared below.
+        let update = {
+            let guard = queue.borrow();
+            let Some(receiver) = guard.as_ref() else {
+                return DrainFlow::Done;
+            };
+            match receiver.try_recv() {
+                Ok(update) => update,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    drop(guard);
+                    ui.repaint_rows(false);
+                    return DrainFlow::Poll;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    drop(guard);
+                    ui.repaint_rows(true);
+                    *queue.borrow_mut() = None;
+                    return DrainFlow::Done;
+                }
+            }
+        };
+        let terminal = matches!(
+            update,
+            ScanUpdate::Finished { .. }
+                | ScanUpdate::Failed { .. }
+                | ScanUpdate::Cancelled
+        );
+        ui.handle_scan_update(update);
+        if terminal {
+            ui.repaint_rows(true);
+            *queue.borrow_mut() = None;
+            return DrainFlow::Done;
+        }
+        if std::time::Instant::now() >= deadline {
+            ui.repaint_rows(false);
+            return DrainFlow::Stay;
+        }
+    }
+}
+
+/// Run the drain on the idle source (runs after input/redraw each
+/// iteration — full spare duty cycle without starving the frame clock).
+fn arm_idle(ui: &Rc<ArborUi>, queue: &ScanQueue) {
+    let (ui, queue) = (ui.clone(), queue.clone());
+    glib::idle_add_local(move || match drain_tick(&ui, &queue) {
+        DrainFlow::Stay => glib::ControlFlow::Continue,
+        DrainFlow::Poll => {
+            arm_poll(&ui, &queue);
+            glib::ControlFlow::Break // Break removes the idle source
+        }
+        DrainFlow::Done => glib::ControlFlow::Break,
+    });
+}
+
+/// Queue is empty: poll every 16 ms until work reappears, then hand back
+/// to the idle pump. Costs nothing while nothing arrives.
+fn arm_poll(ui: &Rc<ArborUi>, queue: &ScanQueue) {
+    let (ui, queue) = (ui.clone(), queue.clone());
+    glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
+        match drain_tick(&ui, &queue) {
+            DrainFlow::Stay => {
+                arm_idle(&ui, &queue);
+                glib::ControlFlow::Break // Break removes the poll source
+            }
+            DrainFlow::Poll => glib::ControlFlow::Continue,
+            DrainFlow::Done => glib::ControlFlow::Break,
+        }
+    });
+}
+
 fn build_rows(
     current: &DisplayNode,
     expanded: &HashSet<PathBuf>,
     sort: (SortKey, bool),
+    now: &glib::DateTime,
 ) -> Vec<ScanRow> {
     let total = current.size.max(1);
     let mut rows = Vec::new();
 
     // Pinned location row with up-arrow (docs/02 §3).
     let loc = ScanRow::new(current.path.clone());
-    fill_row(&loc, current, total, true, 0, false);
+    fill_row(&loc, current, total, true, 0, false, now);
     rows.push(loc);
 
-    emit_children(current, expanded, total, sort, 1, &mut rows);
+    emit_children(current, expanded, total, sort, 1, &mut rows, now);
     rows
 }
 
@@ -1489,28 +1570,45 @@ fn emit_children(
     sort: (SortKey, bool),
     depth: u32,
     rows: &mut Vec<ScanRow>,
+    now: &glib::DateTime,
 ) {
     // Siblings sort by the active column; expanded children stay nested
     // under their parent (hierarchy beats flat sorting, docs/04 §3).
-    let mut children: Vec<&DisplayNode> = node.children.iter().collect();
+    // Sort keys are computed once per child (decorate-sort-undecorate) —
+    // the comparator used to allocate two lowercase Strings per
+    // comparison, which dominated wide-folder rebuilds.
     let (key, descending) = sort;
-    children.sort_by(|a, b| {
+    let mut children: Vec<(&DisplayNode, i64, String)> = node
+        .children
+        .iter()
+        .map(|c| {
+            (
+                c,
+                match key {
+                    SortKey::Name => 0,
+                    SortKey::Size => c.size as i64,
+                    SortKey::Items => c.items as i64,
+                    SortKey::Modified => c.mtime.unwrap_or(0),
+                },
+                c.name.to_lowercase(),
+            )
+        })
+        .collect();
+    children.sort_unstable_by(|a, b| {
         let ord = match key {
-            SortKey::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-            SortKey::Size => a.size.cmp(&b.size),
-            SortKey::Items => a.items.cmp(&b.items),
-            SortKey::Modified => a.mtime.unwrap_or(0).cmp(&b.mtime.unwrap_or(0)),
+            SortKey::Name => a.2.cmp(&b.2),
+            SortKey::Size | SortKey::Items | SortKey::Modified => a.1.cmp(&b.1),
         };
         let ord = if descending { ord.reverse() } else { ord };
         // Stable tie-break: case-insensitive name ascending.
-        ord.then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        ord.then_with(|| a.2.cmp(&b.2))
     });
-    for child in children {
+    for (child, _, _) in children {
         let row = ScanRow::new(child.path.clone());
-        fill_row(&row, child, total, false, depth, expanded.contains(&child.path));
+        fill_row(&row, child, total, false, depth, expanded.contains(&child.path), now);
         rows.push(row);
         if child.is_dir && expanded.contains(&child.path) {
-            emit_children(child, expanded, total, sort, depth + 1, rows);
+            emit_children(child, expanded, total, sort, depth + 1, rows, now);
         }
     }
 }
@@ -1522,15 +1620,16 @@ fn fill_row(
     is_location: bool,
     depth: u32,
     is_expanded: bool,
+    now: &glib::DateTime,
 ) {
     row.set_name(node.name.as_str());
     row.set_size_str(crate::format::size(node.size).as_str());
     row.set_items_str(crate::format::items(node.items).as_str());
-    let now = glib::DateTime::now_local()
-        .unwrap_or_else(|_| glib::DateTime::from_unix_local(0).unwrap());
+    // `now` is shared per rebuild — a fresh glib::DateTime per row made
+    // streaming repaints of wide folders pay thousands of allocations.
     row.set_modified_str(
         node.mtime
-            .map(|m| crate::format::relative_day(m, &now))
+            .map(|m| crate::format::relative_day(m, now))
             .unwrap_or_else(|| "Unknown".to_string())
             .as_str(),
     );
