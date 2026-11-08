@@ -414,6 +414,24 @@ documented cancel invariant (the writer is never `finish()`ed on cancel).
 `child_index_survives_prune_and_remerge` that replays the exact measure →
 prune → re-merge sequence the refresh path exercises on an indexed folder.
 
+### 2.16 Release 51.0.0-beta.2 (2026-11-08)
+Tag `v51.0.0-beta.2`; GitHub pre-release with the same five artifacts +
+`SHA256SUMS.txt`, all rebuilt by the committed `packaging/scripts/`
+pipeline. Ships both perf rounds (`5301080`/`b163724`, §2.15 — cold open
+settle 5.25 → 1.75 s) and the sixth-round cache fix (`9a2cd01`).
+- **Arch** `.pkg.tar.zst` — makepkg from the tag tarball; the packaged
+  binary is run from an extracted staged root in the Xvfb session.
+- **Debian** `.deb` — real `dpkg-deb` in the Ubuntu 25.10 chroot;
+  `Depends` floors unchanged (libc6 ≥ 2.35, libgtk-4-1 ≥ 4.20.1,
+  libadwaita-1-0 ≥ 1.8.0); package contents/depends inspected in-chroot.
+- **Fedora** `.rpm` — `rpmbuild` in fedora:latest (`51.0.0-0.2.beta2`
+  pre-release versioning); `%check` (cargo test) green in the chroot.
+- **Flatpak** `.flatpak` (flatpak-builder, org.gnome.Sdk//51) — the
+  manifest's git source now pins the released commit hash; installed
+  `--user` under a throwaway `XDG_DATA_HOME` and run inside the sandbox
+  in the Xvfb session.
+- **Portable** `.tar.zst` — extracted and run under Xvfb.
+
 ## 3. Implemented, partially verified
 
 | Area | State | What is missing |
@@ -431,7 +449,7 @@ existing window navigates, S06).
 
 ## 4. Implemented but not runtime-verified
 
-- **Packaging** — **built and released as of 51.0.0-beta.1** (see §2.12):
+- **Packaging** — **built and released as of 51.0.0-beta.2** (see §2.12, §2.16):
   all five targets were compiled and their artifacts exercised; what
   remains untested is *installation on the target distributions
   themselves* (the .deb was never installed into a real Debian/Ubuntu

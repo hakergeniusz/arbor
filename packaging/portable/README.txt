@@ -1,4 +1,4 @@
-Arbor 51.0.0-beta.1 — portable build (x86_64)
+Arbor 51.0.0-beta.2 — portable build (x86_64)
 =============================================
 
 Run:  ./arbor [path-to-scan]

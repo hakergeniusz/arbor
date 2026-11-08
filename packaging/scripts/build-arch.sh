@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the Arch package (pacman -U installable .pkg.tar.zst) from the
 # release tarball. Run after make-tarball.sh.
-# Usage: build-arch.sh v51.0.0-beta.1
+# Usage: build-arch.sh v51.0.0-beta.2
 set -euo pipefail
 tag="${1:?usage: build-arch.sh <tag>}"
 root="$(cd "$(dirname "$0")/../.." && pwd)"

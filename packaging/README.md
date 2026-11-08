@@ -18,7 +18,7 @@ need `docker` with root for the Debian/Fedora chroot builds, `makepkg`,
 `flatpak-builder` with the `org.gnome.Sdk//51` runtime, and `zstd`):
 
 ```
-packaging/scripts/make-tarball.sh v51.0.0-beta.1     # git-archive source tarball
+packaging/scripts/make-tarball.sh v51.0.0-beta.2     # git-archive source tarball
 packaging/scripts/build-arch.sh                      # makepkg → .pkg.tar.zst
 packaging/scripts/build-deb.sh                       # debian:trixie → .deb
 packaging/scripts/build-rpm.sh                       # fedora:latest → .rpm
@@ -33,7 +33,7 @@ cp -r packaging/debian .        # debian/ must sit at the source root
 dpkg-buildpackage -us -uc -b
 ```
 
-Produces `../arbor_51.0.0~beta.1-1_<arch>.deb`. `Architecture: any` — builds
+Produces `../arbor_51.0.0~beta.2-1_<arch>.deb`. `Architecture: any` — builds
 on `amd64` and `arm64`. The released .deb is built against Ubuntu 25.10's
 stack (libadwaita 1.9), so it needs Ubuntu 25.10+ / Debian sid-or-newer at
 runtime; the package's Depends carry the exact floors of the build image.
@@ -41,11 +41,11 @@ runtime; the package's Depends carry the exact floors of the build image.
 ## RPM
 
 ```
-rpmbuild -ba packaging/rpm/arbor.spec    # from the v51.0.0-beta.1 source tarball
+rpmbuild -ba packaging/rpm/arbor.spec    # from the v51.0.0-beta.2 source tarball
 ```
 
 `ExclusiveArch: %{rust_tier1_arches}` — x86_64 and aarch64. Pre-release
-versioning per Fedora guidelines: `51.0.0-0.1.beta1`.
+versioning per Fedora guidelines: `51.0.0-0.2.beta2`.
 
 ## Arch Linux
 
@@ -53,7 +53,7 @@ versioning per Fedora guidelines: `51.0.0-0.1.beta1`.
 cd packaging/arch && makepkg -p PKGBUILD
 ```
 
-Installs with `pacman -U arbor-51.0.0beta1-1-x86_64.pkg.tar.zst`.
+Installs with `pacman -U arbor-51.0.0beta2-1-x86_64.pkg.tar.zst`.
 `arch=('x86_64' 'aarch64')`. Replace `sha256sums=('SKIP')` with the real
 checksum when cutting the release tarball.
 
@@ -63,7 +63,7 @@ checksum when cutting the release tarball.
 flatpak-builder --user --force-clean --install-deps-from=flathub \
     build-dir packaging/flatpak/io.github.hakergeniusz.Arbor.json
 flatpak build-bundle build-dir \
-    arbor-51.0.0-beta.1-x86_64.flatpak io.github.hakergeniusz.Arbor
+    arbor-51.0.0-beta.2-x86_64.flatpak io.github.hakergeniusz.Arbor
 ```
 
 Uses `org.gnome.Platform//51` + the rust SDK extension. Pin the manifest's
@@ -74,7 +74,7 @@ enforced in-process and cannot be bypassed by the sandbox.
 
 ## Portable
 
-`arbor-51.0.0-beta.1-portable-x86_64.tar.zst` contains the stripped binary
+`arbor-51.0.0-beta.2-portable-x86_64.tar.zst` contains the stripped binary
 (built in a debian:trixie chroot for the widest glibc compatibility), the
 license, the desktop file and icon for optional manual installation, and a
 README. Extract and run `./arbor` — needs GTK 4 ≥ 4.10 and libadwaita ≥ 1.8

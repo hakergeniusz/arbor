@@ -1,3 +1,12 @@
+arbor (51.0.0~beta.2-1) unstable; urgency=medium
+
+  * Second public beta: cache hits no longer trigger a rescan (the Rescan
+    button/Ctrl+R do a true from-disk rescan), and the scan-ingest tail is
+    ~3x faster — cold open settles at 1.75 s on a 101k-item fixture
+    (Baobab 50.0: 2.25 s on the same benchmark).
+
+ -- hakergeniusz <hakergeniusz@users.noreply.github.com>  Sun, 08 Nov 2026 21:45:00 +0100
+
 arbor (51.0.0~beta.1-1) unstable; urgency=medium
 
   * First public beta (clean-room implementation of the Arbor behavioral

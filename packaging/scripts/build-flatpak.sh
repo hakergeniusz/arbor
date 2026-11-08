@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the single-file Flatpak bundle with flatpak-builder (host; requires
 # the org.gnome.Sdk//51 runtime + rust-stable extension installed).
-# Usage: build-flatpak.sh v51.0.0-beta.1
+# Usage: build-flatpak.sh v51.0.0-beta.2
 set -euo pipefail
 tag="${1:?usage: build-flatpak.sh <tag>}"
 root="$(cd "$(dirname "$0")/../.." && pwd)"

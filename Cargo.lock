@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "arbor"
-version = "51.0.0-beta.1"
+version = "51.0.0-beta.2"
 dependencies = [
  "glib-build-tools",
  "gtk4",

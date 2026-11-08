@@ -2,8 +2,8 @@
 # Build from a source checkout:  makepkg -p PKGBUILD  (inside packaging/arch)
 # or place the release tarball next to the PKGBUILD and makepkg uses it.
 pkgname=arbor
-_tag=v51.0.0-beta.1
-pkgver=51.0.0beta1
+_tag=v51.0.0-beta.2
+pkgver=51.0.0beta2
 pkgrel=1
 pkgdesc="See where your disk space grows — a disk usage analyzer"
 arch=('x86_64' 'aarch64')

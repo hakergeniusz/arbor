@@ -45,7 +45,7 @@
                 {
                     "type": "git",
                     "url": "https://github.com/hakergeniusz/arbor",
-                    "tag": "v51.0.0-beta.1",
+                    "tag": "v51.0.0-beta.2",
                     "x-comment": "Pin 'commit' to the tag's hash to protect against tag moves."
                 }
             ],

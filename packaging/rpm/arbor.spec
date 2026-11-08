@@ -2,11 +2,11 @@
 # (or packaging/scripts/build-rpm.sh, which drives a fedora container)
 Name:           arbor
 Version:        51.0.0
-Release:        0.1.beta1%{?dist}
+Release:        0.2.beta2%{?dist}
 Summary:        See where your disk space grows — a disk usage analyzer
 License:        MIT
 URL:            https://github.com/hakergeniusz/arbor
-Source0:        %{url}/archive/refs/tags/v51.0.0-beta.1.tar.gz
+Source0:        %{url}/archive/refs/tags/v51.0.0-beta.2.tar.gz
 
 # rust tier-1: covers x86_64 and aarch64; the macro needs rust-srpm-macros,
 # fall back to the explicit list where it is not installed
@@ -32,7 +32,7 @@ code.}
 %{_description}
 
 %prep
-%autosetup -n arbor-v51.0.0-beta.1
+%autosetup -n arbor-v51.0.0-beta.2
 
 %build
 cargo build --release --locked
@@ -58,6 +58,9 @@ cargo test --locked
 %{_datadir}/icons/hicolor/scalable/apps/io.github.hakergeniusz.Arbor.svg
 
 %changelog
+* Sun Nov 08 2026 hakergeniusz <hakergeniusz@users.noreply.github.com> - 51.0.0-0.2.beta2
+- Second public beta: cache hits no longer rescan; scan-ingest tail ~3x
+  faster (cold open 1.75 s vs Baobab 2.25 s on the 101k-item benchmark).
 * Thu Nov 05 2026 hakergeniusz <hakergeniusz@users.noreply.github.com> - 51.0.0-0.1.beta1
 - First public beta (clean-room implementation of the Arbor behavioral
   specification; see docs/ for the specification and provenance).
