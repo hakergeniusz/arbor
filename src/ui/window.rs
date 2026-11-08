@@ -272,14 +272,11 @@ impl ArborUi {
             self.back_btn.connect_clicked(move |_| ui.show_start());
         }
 
-        // Rescan re-scans the current location (S23).
+        // Rescan re-scans the current location (S23) — a real rescan, not a
+        // cache restore.
         {
             let ui = self.clone();
-            self.rescan_btn.connect_clicked(move |_| {
-                if let Some(path) = ui.current_location() {
-                    ui.open_location(&path);
-                }
-            });
+            self.rescan_btn.connect_clicked(move |_| ui.rescan_current());
         }
 
         // Chart mode toggle (per-window state, docs/02 §5).
@@ -625,8 +622,10 @@ impl ArborUi {
 
     /// Open (scan) a folder, switching to the result view (docs/03 §1).
     /// With the scan cache enabled (user request), a previously finished
-    /// scan of this folder is restored instantly and refreshed by a live
-    /// rescan; otherwise the folder is scanned from scratch.
+    /// scan of this folder is restored instantly and the view stays on it —
+    /// no automatic rescan (recalculating on every open defeated the cache;
+    /// refreshing is what ↻/Ctrl+R are for). Without a cache hit the folder
+    /// is scanned from scratch.
     pub fn open_location(self: &Rc<Self>, path: &Path) {
         if !path.is_dir() {
             self.toast(&format!("“{}” is not a valid folder", path.display()));
@@ -643,11 +642,8 @@ impl ArborUi {
             CacheLoad::None
         };
         match cached {
-            CacheLoad::None => self.start_scan(path, false),
-            CacheLoad::Ready(snapshot) => {
-                self.install_cached(path, snapshot);
-                self.start_scan(path, true);
-            }
+            CacheLoad::None => self.start_scan(path),
+            CacheLoad::Ready(snapshot) => self.install_cached(path, snapshot),
             CacheLoad::Pending(receiver) => {
                 // Big snapshot: decode on the worker, spinner meanwhile.
                 self.result_view.show_page("spinner");
@@ -679,16 +675,21 @@ impl ArborUi {
                         }
                     };
                     match outcome {
-                        Some(Some(snapshot)) => {
-                            ui.install_cached(&path, snapshot);
-                            ui.start_scan(&path, true);
-                        }
-                        _ => ui.start_scan(&path, false),
+                        Some(Some(snapshot)) => ui.install_cached(&path, snapshot),
+                        _ => ui.start_scan(&path),
                     }
                     glib::ControlFlow::Break
                 });
             }
         }
+    }
+
+    /// True re-scan of the current location (S23): bypasses the cache read
+    /// entirely and rebuilds the tree from disk.
+    pub fn rescan_current(self: &Rc<Self>) {
+        let Some(path) = self.current_location() else { return };
+        self.cancel_scan();
+        self.start_scan(&path);
     }
 
     /// Header/state shared by every path into the result view (docs/01 §3):
@@ -737,44 +738,54 @@ impl ArborUi {
         }
     }
 
-    /// Install a restored snapshot as the displayed tree (the refresh scan
-    /// then brings it up to date; deleted entries are pruned by the
-    /// DirListed rule in `handle_scan_update`).
-    fn install_cached(&self, path: &Path, snapshot: crate::cache::CachedScan) {
-        let mut state = self.state.borrow_mut();
-        let mut root = snapshot.root;
-        // The cache stores the filesystem name; the UI tree uses the display
-        // name (e.g. "Home Folder"), exactly like a fresh scan's root.
-        root.name = self.display_name(path);
-        state.tree = Some(root);
-        state.current = Some(path.to_path_buf());
-        state.current_folder = path.to_path_buf();
-        state.rings_cache = None;
-        state.treemap_cache = None;
-        state.tree_gen += 1;
+    /// Install a restored snapshot as the displayed tree and finalize the
+    /// view exactly like a completed scan (rows, charts, recents) — minus
+    /// the rescan: the cache hit is the result until the user asks for
+    /// fresh data (↻/Ctrl+R). A toast states the restore and its age so a
+    /// stale snapshot is never mistaken for a fresh scan.
+    fn install_cached(self: &Rc<Self>, path: &Path, snapshot: crate::cache::CachedScan) {
+        let scanned_at = snapshot.scanned_at;
+        {
+            let mut state = self.state.borrow_mut();
+            let mut root = snapshot.root;
+            // The cache stores the filesystem name; the UI tree uses the display
+            // name (e.g. "Home Folder"), exactly like a fresh scan's root.
+            root.name = self.display_name(path);
+            state.tree = Some(root);
+            state.current = Some(path.to_path_buf());
+            state.current_folder = path.to_path_buf();
+            state.rings_cache = None;
+            state.treemap_cache = None;
+            state.tree_gen += 1;
+            state.expanded.clear();
+        }
+        // Recents parity with a completed scan (docs/03 §6) — except mount
+        // roots and the home folder, as in `Finished` (no duplicate rows).
+        let is_permanent_row = path == glib::home_dir()
+            || crate::mounts::list_mounts().iter().any(|m| m.root == path);
+        if !is_permanent_row {
+            self.settings.borrow_mut().push_recent(&path.display().to_string());
+        }
+        self.refresh_start_page();
+        self.result_view.set_scan_progress(false, None);
+        self.rebuild_rows();
+        self.show_chart_page();
+        self.select_largest_child();
+        self.toast(&format!(
+            "Restored scan from cache ({})",
+            format_scanned_at(scanned_at)
+        ));
     }
 
-    /// Spin up the scanner and its drain loop. `refresh` = a cached snapshot
-    /// is already installed: the tree survives (the merge is idempotent per
-    /// path) and the spinner page is skipped — the restored rows stay
-    /// visible while the rescan runs.
-    fn start_scan(self: &Rc<Self>, path: &Path, refresh: bool) {
+    /// Spin up the scanner and its drain loop, rebuilding the tree from
+    /// scratch: the spinner page shows while the worker streams updates.
+    fn start_scan(self: &Rc<Self>, path: &Path) {
         {
             let mut state = self.state.borrow_mut();
             state.current = Some(path.to_path_buf());
             state.current_folder = path.to_path_buf();
-            if !refresh {
-                state.tree = None;
-                state.known.clear();
-            } else {
-                // Pre-fill the duplicate guard from the snapshot so the
-                // refresh merge treats cached entries as known.
-                let mut known = HashSet::new();
-                if let Some(tree) = &state.tree {
-                    tree.collect_paths(&mut known);
-                }
-                state.known = known;
-            }
+            state.tree = None;
+            state.known.clear();
             state.expanded.clear();
             state.pending_autoselect = true;
             state.scan_entries = 0;
@@ -784,16 +795,9 @@ impl ArborUi {
             state.treemap_cache = None;
         }
 
-        if refresh {
-            // Show the restored rows immediately; the rescan refines them.
-            self.rebuild_rows();
-            self.result_view
-                .set_scan_progress(true, Some("Rescanning…"));
-        } else {
-            self.result_view.show_page("spinner");
-            self.result_view.set_scan_progress(true, Some("Scanning…"));
-            self.result_view.set_rows(&[]);
-        }
+        self.result_view.show_page("spinner");
+        self.result_view.set_scan_progress(true, Some("Scanning…"));
+        self.result_view.set_rows(&[]);
 
         let ignored = self.settings.borrow().ignored.clone();
         let recursive = self.settings.borrow().recursive_mounts;
@@ -1445,6 +1449,21 @@ use crate::models::EntryMeta;
 
 /// Build the flat row list: pinned location row + sorted children, expanded
 /// folders inline (docs/04 §2, docs/02 §3).
+/// Local time of a cached scan for the restore toast: time-of-day for
+/// today's scans, full date+time otherwise.
+fn format_scanned_at(secs: u64) -> String {
+    let Ok(dt) = glib::DateTime::from_unix_local(secs as i64) else {
+        return "unknown time".into();
+    };
+    let now = glib::DateTime::now_local().unwrap_or_else(|_| dt.clone());
+    let today = dt.year() == now.year()
+        && dt.month() == now.month()
+        && dt.day_of_month() == now.day_of_month();
+    dt.format(if today { "%H:%M" } else { "%Y-%m-%d %H:%M" })
+        .map(|s| s.to_string())
+        .unwrap_or_else(|_| "unknown time".into())
+}
+
 fn build_rows(
     current: &DisplayNode,
     expanded: &HashSet<PathBuf>,

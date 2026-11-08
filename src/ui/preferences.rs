@@ -42,14 +42,14 @@ pub fn present(ui: &Rc<ArborUi>) {
     page.add(&chart_group);
 
     // Scan cache (user request): finished scans persist under the XDG cache
-    // so re-opening a folder restores the previous result instantly; a live
-    // rescan always refreshes it.
+    // so re-opening a folder restores the previous result instantly; the
+    // rescan button refreshes it.
     let cache_group = adw::PreferencesGroup::builder()
         .title("Scanning")
         .build();
     let cache_scans = adw::SwitchRow::builder()
         .title("Cache scan results")
-        .subtitle("Re-open recent folders instantly; they are refreshed automatically")
+        .subtitle("Re-open recent folders instantly; the Rescan button refreshes them")
         .active(ui.settings.borrow().cache_scans)
         .build();
     {

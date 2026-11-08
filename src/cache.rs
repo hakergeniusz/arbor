@@ -1,10 +1,10 @@
 //! On-disk scan cache (user request: "add caching").
 //!
 //! A finished scan is persisted under `$XDG_CACHE_HOME/arbor/scans/` so
-//! re-opening the same folder restores the previous result instantly while a
-//! live rescan refreshes it (docs/03's snapshot semantics are untouched — a
-//! cached snapshot is simply an older one, and Ctrl+R always re-scans for
-//! real).
+//! re-opening the same folder restores the previous result instantly — no
+//! automatic rescan (a restore that recalculates defeats the cache); the
+//! rescan button / Ctrl+R refresh it for real (docs/03's snapshot semantics
+//! are untouched — a cached snapshot is simply an older one).
 //!
 //! Format: a flat pre-order stream of records instead of a nested tree, so
 //! the scanner worker can append one record per entry *as it lstats it* —

@@ -151,15 +151,13 @@ fn register_actions(app: &adw::Application, ui: &Rc<ArborUi>) {
                 about::present(&ui_about.window);
             })
             .build(),
-        // Rescan (S23; scanner wiring lands in phase 3).
+        // Rescan (S23) — bypasses the scan cache and rebuilds from disk.
         gio::ActionEntry::builder("rescan")
             .activate(|_: &adw::Application, _, _| {
                 UI.with(|slot| {
                     let slot = slot.borrow();
                     if let Some(ui) = slot.as_ref() {
-                        if let Some(path) = ui.current_location() {
-                            ui.open_location(&path);
-                        }
+                        ui.rescan_current();
                     }
                 });
             })
