@@ -10,7 +10,7 @@ and what is **not done** — no claims beyond that.
   first release: https://github.com/hakergeniusz/arbor/releases/tag/v51.0.0-beta.1
 - Test suite: **38 tests, 0 failures** (24 unit + 14 scanner-integration)
 - GUI evidence: ~200 screenshots from the hermetic Xvfb session
-  (`/tmp/arbor-gui/shots/01…218`, referenced below as S###/A#–A# from
+  (`/tmp/arbor-gui/shots/01…224`, referenced below as S###/A#–A# from
   `docs/09-test-scenarios.md`)
 - Clean-room rules honored throughout: no Baobab source, no `tools/`
   inspection/execution, `/usr/bin/baobab` never launched.
@@ -235,6 +235,8 @@ mount-name display names (above). Two user requests implemented:
   an application restart. Unit-tested: record/decode roundtrip with
   finalized aggregates, garbage/foreign-path rejection, `collect_paths`,
   and a real cached-scan roundtrip through `spawn_ext`.
+  *(Superseded by §2.13: the automatic refresh-after-restore was removed —
+  a restore no longer rescans; ↻/Ctrl+R do, bypassing the cache read.)*
 
 **Follow-up polish (same day, shots 207–209)**: two user-flagged
 mismatches fixed — (1) scanning a mount root recorded a **recent row
@@ -292,6 +294,28 @@ pre-release with five artifacts, all built by committed scripts
   crates.io fetch).
 - **Portable** `.tar.zst` (Ubuntu 25.10-built stripped binary +
   license/desktop/icon) — extracted and run under Xvfb (shot 218).
+
+### 2.13 Sixth round (2026-11-08, shots 220–224): cache restore no longer rescans
+User report: **"The caching does not work. It always recalculates it."**
+Root cause in `open_location`: a cache hit installed the snapshot and then
+unconditionally called `start_scan(path, true)` — a full live rescan with a
+"Rescanning…" bar on every open, so the cache only ever *seeded* the rescan
+and never saved work. The Rescan button and Ctrl+R (`app.rescan`) also
+routed through `open_location`, i.e. through the cache read. Fix:
+- a cache hit (sync or worker-thread decode) now installs the snapshot and
+  finalizes the view exactly like a completed scan (rows, charts, recents
+  bump, largest-child selection) and **stops there** — no automatic rescan;
+- new `Window::rescan_current()` for the Rescan button and Ctrl+R: a true
+  from-disk rescan that never reads the cache;
+- `install_cached` clears stale expansion state, bumps recents and toasts
+  "Restored scan from cache (HH:MM)" so a stale snapshot is never mistaken
+  for a fresh scan; `start_scan` lost its now-unused `refresh` branch.
+Verified in Xvfb (hermetic session): first launch scans and writes the
+cache; relaunch restores the full result in ~1 s with the toast, no
+spinner, and the cache file's mtime **unchanged** (no scan, no rewrite);
+after adding a file to the fixture the restore still shows the stale
+snapshot while Ctrl+R picks the new file up (28→29 items) and rewrites the
+cache (981→1020 B). 38 tests green (commit `9a2cd01`).
 
 ## 3. Implemented, partially verified
 
