@@ -121,6 +121,19 @@ impl DisplayNode {
         self.child_index = None;
     }
 
+    /// Reverse child order, keeping the name index consistent (the cache
+    /// decode attaches bottom-up, which delivers each folder's children in
+    /// reverse record order; this restores the recorded order).
+    pub(crate) fn reverse_children(&mut self) {
+        if self.children.len() < 2 {
+            return;
+        }
+        self.children.reverse();
+        if self.child_index.is_some() {
+            self.build_child_index();
+        }
+    }
+
     fn build_child_index(&mut self) {
         let mut index = HashMap::with_capacity(self.children.len());
         for (i, child) in self.children.iter().enumerate() {

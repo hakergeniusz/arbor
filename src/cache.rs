@@ -9,10 +9,13 @@
 //! Format: a flat pre-order stream of records instead of a nested tree, so
 //! the scanner worker can append one record per entry *as it lstats it* —
 //! streaming, no extra worker memory, and the main loop never pays for
-//! encoding. The decoder rebuilds the tree by parent index and recomputes
-//! folder aggregates bottom-up (`finalize_from_children`), which reproduces
-//! exactly the tree the UI holds after `Finished` (folder size = own +
-//! Σ children, all nodes measured).
+//! encoding. The decoder reads one pass into slot storage (parents are
+//! always recorded before children, so a record's parent is already
+//! decoded), then rebuilds the tree with two non-recursive index sweeps:
+//! descending order aggregates folder sizes bottom-up (size = own +
+//! Σ descendants), ascending order attaches children (per-parent order =
+//! record order) — reproducing exactly the tree the UI holds after
+//! `Finished`, with no recursion to overflow on pathological depth.
 //!
 //! ```text
 //! header:  "ARBCACHE2" | u32 node_count | u64 root mtime | u64 scanned_at
@@ -78,6 +81,9 @@ pub struct Writer {
     tmp_path: PathBuf,
     final_path: PathBuf,
     node_count: u32,
+    /// Reusable record buffer: fixed fields + name packed into one
+    /// `write_all` per record instead of seven.
+    buf: Vec<u8>,
 }
 
 impl Writer {
@@ -103,6 +109,7 @@ impl Writer {
             tmp_path,
             final_path,
             node_count: 0,
+            buf: Vec::with_capacity(4 + 1 + 8 + 1 + 8 + 2 + 128),
         })
     }
 
@@ -128,18 +135,25 @@ impl Writer {
         if error {
             flags |= 2;
         }
-        self.out.write_all(&parent.unwrap_or(u32::MAX).to_le_bytes()).ok()?;
-        self.out.write_all(&[flags]).ok()?;
-        self.out.write_all(&own_size.to_le_bytes()).ok()?;
+        // One write per record: the BufWriter coalesces, but seven small
+        // write_all calls per record across 10⁵+ records add up.
+        let mut buf = std::mem::take(&mut self.buf);
+        buf.clear();
+        buf.extend_from_slice(&parent.unwrap_or(u32::MAX).to_le_bytes());
+        buf.push(flags);
+        buf.extend_from_slice(&own_size.to_le_bytes());
         match mtime {
             Some(m) => {
-                self.out.write_all(&[1]).ok()?;
-                self.out.write_all(&m.to_le_bytes()).ok()?;
+                buf.push(1);
+                buf.extend_from_slice(&m.to_le_bytes());
             }
-            None => self.out.write_all(&[0]).ok()?,
+            None => buf.push(0),
         }
-        self.out.write_all(&(name.len() as u16).to_le_bytes()).ok()?;
-        self.out.write_all(name.as_bytes()).ok()?;
+        buf.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        buf.extend_from_slice(name.as_bytes());
+        let written = self.out.write_all(&buf).ok();
+        self.buf = buf;
+        written?;
         self.next_index += 1;
         self.node_count += 1;
         Some(index)
@@ -253,11 +267,17 @@ pub fn load(root: &Path) -> Option<CachedScan> {
         return None;
     }
 
-    // Decode the flat stream: nodes stay index-addressable until every
-    // record is read, then the tree is assembled by moving nodes into their
-    // parents (a node cannot live in both the index vec and its parent).
-    let mut nodes: Vec<DisplayNode> = Vec::with_capacity(node_count as usize);
-    let mut child_lists: Vec<Vec<u32>> = Vec::with_capacity(node_count as usize);
+    // Decode the flat stream in one pass into slot storage. The scanner
+    // writes every record after its parent (a directory's record is written
+    // when its frame is pushed), so a record's parent is always already
+    // decoded when the record arrives. The tree is then rebuilt by two
+    // non-recursive sweeps: descending index order aggregates sizes/items
+    // into parents (a child is always aggregated before its parent is
+    // touched), ascending index order attaches each node to its parent
+    // (per-parent child order = record order). No recursion: a pathological
+    // deep chain cannot overflow the stack.
+    let mut slots: Vec<Option<DisplayNode>> = Vec::with_capacity(node_count as usize);
+    let mut parents: Vec<u32> = Vec::with_capacity(node_count as usize);
     for _ in 0..node_count {
         let parent = read_u32(&mut r)?;
         let flags = read_u8(&mut r)?;
@@ -268,7 +288,7 @@ pub fn load(root: &Path) -> Option<CachedScan> {
             None
         };
         let name_len = read_u16(&mut r)? as usize;
-        if name_len > 4096 || nodes.len() >= node_count as usize {
+        if name_len > 4096 || slots.len() >= node_count as usize {
             return None;
         }
         let mut name_buf = vec![0u8; name_len];
@@ -277,13 +297,13 @@ pub fn load(root: &Path) -> Option<CachedScan> {
         let path = if parent == u32::MAX {
             root_path.clone()
         } else {
-            let parent_node = nodes.get(parent as usize)?;
-            if !parent_node.is_dir {
-                return None;
-            }
+            let parent_node = slots
+                .get(parent as usize)
+                .and_then(|s| s.as_ref())
+                .filter(|p| p.is_dir)?;
             parent_node.path.join(&name)
         };
-        nodes.push(DisplayNode {
+        slots.push(Some(DisplayNode {
             name,
             path,
             is_dir: flags & 1 != 0,
@@ -295,16 +315,35 @@ pub fn load(root: &Path) -> Option<CachedScan> {
             measured: true,
             children: Vec::new(),
             child_index: None,
-        });
-        child_lists.push(Vec::new());
-        if parent != u32::MAX {
-            let idx = nodes.len() as u32 - 1;
-            child_lists[parent as usize].push(idx);
-        }
+        }));
+        parents.push(parent);
     }
-    let mut slots: Vec<Option<DisplayNode>> = nodes.into_iter().map(Some).collect();
-    let mut root_node = assemble(&mut slots, &child_lists, 0);
-    finalize(&mut root_node);
+    let n = slots.len();
+    // Bottom-up attach (the old recursive assemble, as index math):
+    // descending index order moves every node after all of its descendants
+    // are already attached, so each subtree travels as one. The moved
+    // node's aggregates fold into the parent at the same moment (folder
+    // size = own + Σ descendants, items = 1 + Σ — the old finalize).
+    // Attaching delivers each folder's children in reverse record order,
+    // so each completed subtree reverses its children back (and rebuilds
+    // the name index built during attach) before moving to its parent.
+    for i in (1..n).rev() {
+        if parents[i] == u32::MAX {
+            continue; // stray extra root record: not part of the tree
+        }
+        let p = parents[i] as usize;
+        if p >= n {
+            continue; // unreachable (decode bounds parents), kept for safety
+        }
+        let mut node = slots[i].take().expect("attached once");
+        node.reverse_children();
+        let parent = slots[p].as_mut().expect("parent decoded first");
+        parent.size += node.size;
+        parent.items += node.items;
+        parent.push_child(node);
+    }
+    let mut root_node = slots.swap_remove(0).expect("root decoded");
+    root_node.reverse_children();
     // The root's stored mtime is the directory's; kept in the header as a
     // cross-check hook for future validation strategies.
     let _ = root_mtime;
@@ -312,31 +351,6 @@ pub fn load(root: &Path) -> Option<CachedScan> {
         root: root_node,
         scanned_at,
     })
-}
-
-/// Move node `idx` and its recorded children out of the flat slots.
-fn assemble(
-    slots: &mut [Option<DisplayNode>],
-    child_lists: &[Vec<u32>],
-    idx: usize,
-) -> DisplayNode {
-    let mut node = slots.get_mut(idx).and_then(|s| s.take()).expect("assembled once");
-    if child_lists.get(idx).is_some_and(|l| !l.is_empty()) {
-        for &c in child_lists[idx].iter() {
-            node.push_child(assemble(slots, child_lists, c as usize));
-        }
-    }
-    node
-}
-
-fn finalize(node: &mut DisplayNode) {
-    if !node.is_dir {
-        return;
-    }
-    for child in &mut node.children {
-        finalize(child);
-    }
-    node.finalize_from_children();
 }
 
 fn read_u8(r: &mut impl Read) -> Option<u8> {
@@ -412,6 +426,46 @@ mod tests {
         assert_eq!(root.size, 4096 + docs_node.size + 200_000);
         assert_eq!(root.items, 1 + docs_node.items + 1);
         assert!(root.measured && docs_node.children.iter().all(|c| c.measured));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A 1000-deep chain: the decode's bottom-up attach must rebuild the
+    /// whole subtree iteratively (no recursion) with intact aggregates,
+    /// child order and paths.
+    #[test]
+    fn deep_chain_decodes_iteratively_with_intact_aggregates() {
+        const DEPTH: u32 = 1000;
+        let dir = std::env::temp_dir().join(format!("arbor-cache-deep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let root_path = dir.join("deep-root");
+        std::fs::create_dir_all(&root_path).unwrap();
+
+        let mut writer = Writer::create(&root_path, 1).expect("writer");
+        writer
+            .record(None, "deep-root", true, false, 1, Some(1))
+            .expect("root record");
+        let mut parent = Some(0u32);
+        for d in 1..DEPTH {
+            parent = writer.record(parent, &format!("n{d:04}"), true, false, 1, Some(1));
+            assert!(parent.is_some(), "record {d} accepted");
+        }
+        writer.finish();
+
+        let cached = load(&root_path).expect("loaded");
+        let mut node = &cached.root;
+        assert_eq!(node.name, "deep-root");
+        assert_eq!(node.size, DEPTH as u64, "root aggregates the whole chain");
+        assert_eq!(node.items, DEPTH as u64);
+        let mut path = root_path.clone();
+        for d in 1..DEPTH {
+            assert_eq!(node.children.len(), 1, "single child at depth {d}");
+            node = &node.children[0];
+            path.push(format!("n{d:04}"));
+            assert_eq!(node.path, path, "path chain intact at depth {d}");
+        }
+        assert_eq!(node.name, format!("n{:04}", DEPTH - 1));
+        assert_eq!(node.size, 1);
+        assert!(node.children.is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 
