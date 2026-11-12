@@ -432,6 +432,55 @@ settle 5.25 → 1.75 s) and the sixth-round cache fix (`9a2cd01`).
   in the Xvfb session.
 - **Portable** `.tar.zst` — extracted and run under Xvfb.
 
+### 2.17 Eighth round (2026-11-12): cache decode, write and housekeeping
+
+User request: *"further optimize caching."* Temporary env-gated
+instrumentation (`ARBOR_CACHE_DEBUG`, removed before commit) profiled the
+warm-restore decode of the 101k-node cache: ~33 ms total — read loop ~17 ms,
+recursive `assemble` ~16 ms, recursive `finalize` ~0.9 ms. Three commits:
+- `perf(cache)` (`9fba160`): the decode now reads one pass into slot storage
+  (the scanner always records a parent before its children) and rebuilds the
+  tree with a single bottom-up sweep in descending index order — each
+  completed subtree folds its aggregates into its parent and moves in, then
+  reverses its children back to record order. No recursion anywhere (the old
+  `assemble`/`finalize` pair), no per-record `child_lists` allocations, and
+  one slot vec instead of nodes+slots — roughly half the transient decode
+  memory. `Writer::record` packs each record into one `write_all` instead of
+  seven. Honest measurement: the 101k decode total is unchanged (~34 ms —
+  the per-node `path.join` and node moves dominate, not the structure); the
+  wins are memory, allocation count and robustness. A 1000-deep chain test
+  pins the iterative rebuild end to end.
+- `fix(cache)` (`9ee96f7`): a cancelled or failed scan used to leak its
+  `.tree.tmp` forever (the benchmark cancel runs each left one behind);
+  `Writer` now removes its temp file in `Drop` when `finish()` was never
+  reached. The prune additionally deletes `.tree.tmp` orphans older than
+  24 h (younger ones may belong to a concurrent scan in another instance)
+  and enforces a cumulative 256 MiB cap beside the existing 4-file limit.
+  Cache-path derivation split into `cache_file_for(base, root)` so the unit
+  tests run in throwaway directories instead of the real XDG cache.
+- `chore(repo)` (`8d6098e`): untracked 135 stray makepkg build outputs
+  (staged package trees and debug binaries accidentally committed in
+  `e3253fb`) and ignored `packaging/arch/{pkg,src}/`.
+
+Benchmark (same harness rules as §2.14/§2.15; 101k fixture; cold = page
+cache dropped + cache deleted; warm = cache present; 4 fps frame grid, so
+times carry ±0.25 s quantization):
+
+| Scenario | Result | Round-7 reference |
+|---|---|---|
+| Cold: scanner + cache write done | **1.24 / 1.33 / 1.34 s** | 1.20–1.25 s |
+| Cold: UI settle | **1.5 / 1.5 / 1.75 s** | 1.75 s |
+| Warm: first content (restore visible) | **0.75–1.0 s ×4** | ≤0.55 s (0.1 s toast-probe grid) |
+| Warm: cache file untouched (sha256) | **yes ×4, zero writes** | yes |
+
+Warm opens never write: no `.tree.tmp` is even created (a restore performs
+no scan, so the new Drop path never engages). The cancel path was re-run
+under the round-7 protocol (cold cache, Escape mid-scan): scanner thread
+exits, no panic, and the scans directory is left **completely empty** —
+the previously documented invariant ("cancel leaves a `.tree.tmp`
+leftover") is fixed, not just documented. 42 tests green (39 + deep-chain
+decode, writer-Drop cleanup, prune rules).
+
 ## 3. Implemented, partially verified
 
 | Area | State | What is missing |
