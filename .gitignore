@@ -8,3 +8,7 @@
 
 # Release artifacts (dist/) are built, not committed
 /dist/
+
+# makepkg build/staging dirs (packaging/arch)
+/packaging/arch/pkg/
+/packaging/arch/src/

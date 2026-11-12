@@ -1,6 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<gresources>
-  <gresource prefix="/io/github/hakergeniusz/Arbor/icons/scalable/apps">
-    <file alias="io.github.hakergeniusz.Arbor.svg" compressed="true">icons/scalable/apps/io.github.hakergeniusz.Arbor.svg</file>
-  </gresource>
-</gresources>
