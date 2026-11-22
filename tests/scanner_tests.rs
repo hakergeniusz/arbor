@@ -374,7 +374,6 @@ fn coalesced_stream_replays_to_the_final_tree() {
     let updates = collect_updates(&dir);
 
     let mut tree: Option<arbor::models::DisplayNode> = None;
-    let mut known: HashSet<PathBuf> = HashSet::new();
     let mut measured: HashMap<PathBuf, (u64, u64)> = HashMap::new();
     for update in &updates {
         match update {
@@ -394,10 +393,7 @@ fn coalesced_stream_replays_to_the_final_tree() {
                     ));
                 }
                 let expected = entries.len();
-                let merged = tree
-                    .as_mut()
-                    .unwrap()
-                    .merge_entries(entries.clone(), &mut known);
+                let merged = tree.as_mut().unwrap().merge_entries(entries.clone());
                 assert_eq!(
                     merged, expected,
                     "every entry must find its parent when merged — \
@@ -489,13 +485,12 @@ fn flat_directory_merges_in_linear_time() {
         mtime: None,
     };
     let mut tree = arbor::models::DisplayNode::new_dir(&root_meta);
-    let mut known = HashSet::new();
     let started = std::time::Instant::now();
     // Replay batch-by-batch exactly like the UI drain (emitter batches are
     // capped at 512 entries).
     let mut merged_total = 0;
     for chunk in entries.chunks(512) {
-        merged_total += tree.merge_entries(chunk.to_vec(), &mut known);
+        merged_total += tree.merge_entries(chunk.to_vec());
     }
     let elapsed = started.elapsed();
     assert_eq!(merged_total, n);
@@ -511,8 +506,6 @@ fn flat_directory_merges_in_linear_time() {
 /// nodes, no double-counted aggregates.
 #[test]
 fn merge_entries_is_idempotent_per_path() {
-    use std::collections::HashSet;
-
     let parent: PathBuf = "/dup".into();
     let meta = |name: &str| arbor::models::EntryMeta {
         name: name.into(),
@@ -532,14 +525,45 @@ fn merge_entries_is_idempotent_per_path() {
         mtime: None,
     };
     let mut tree = arbor::models::DisplayNode::new_dir(&root_meta);
-    let mut known = HashSet::new();
-    assert_eq!(tree.merge_entries(entries.clone(), &mut known), 3);
+    assert_eq!(tree.merge_entries(entries.clone()), 3);
     // Replay the identical listing: nothing new may be merged.
-    assert_eq!(tree.merge_entries(entries.clone(), &mut known), 0);
+    assert_eq!(tree.merge_entries(entries.clone()), 0);
     let node = tree.find(&parent).unwrap();
     assert_eq!(node.items, 4); // self + a + b + c
     assert_eq!(node.size, 30);
     assert_eq!(node.children.len(), 3);
+}
+
+/// Duplicate detection must use the raw path component: the scanner stores a
+/// lossy UTF-8 display name, which cannot identify a non-UTF-8 filename.
+#[test]
+fn merge_entries_dedupes_non_utf8_names() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let parent: PathBuf = "/nonutf8".into();
+    let raw_name = OsString::from_vec(vec![0xff, 0xfe, b'.', b't', b'x', b't']);
+    let path = parent.join(&raw_name);
+    let meta = arbor::models::EntryMeta {
+        name: path.file_name().unwrap().to_string_lossy().into_owned(),
+        path: path.clone(),
+        is_dir: false,
+        error: false,
+        own_size: 10,
+        mtime: None,
+    };
+    let root_meta = arbor::models::EntryMeta {
+        name: "nonutf8".into(),
+        path: parent,
+        is_dir: true,
+        error: false,
+        own_size: 0,
+        mtime: None,
+    };
+    let mut tree = arbor::models::DisplayNode::new_dir(&root_meta);
+    assert_eq!(tree.merge_entries(vec![meta.clone()]), 1);
+    assert_eq!(tree.merge_entries(vec![meta]), 0);
+    assert_eq!(tree.find(&root_meta.path).unwrap().children.len(), 1);
 }
 
 /// The child name index (seventh-round perf work) must stay consistent
@@ -548,8 +572,6 @@ fn merge_entries_is_idempotent_per_path() {
 /// including aggregates rolled up over the index by `apply_measured`.
 #[test]
 fn child_index_survives_prune_and_remerge() {
-    use std::collections::HashSet;
-
     let parent: PathBuf = "/wide".into();
     let top_meta = |i: usize| arbor::models::EntryMeta {
         name: format!("d{i:03}"),
@@ -568,11 +590,10 @@ fn child_index_survives_prune_and_remerge() {
         mtime: None,
     };
     let mut tree = arbor::models::DisplayNode::new_dir(&root_meta);
-    let mut known = HashSet::new();
 
     // 100 directories > CHILD_INDEX_MIN (32): the index builds mid-merge.
     let first: Vec<_> = (0..100).map(top_meta).collect();
-    assert_eq!(tree.merge_entries(first, &mut known), 100);
+    assert_eq!(tree.merge_entries(first), 100);
     assert!(tree.find(&parent.join("d007")).is_some());
 
     // Children under d007 (listed after its own entry, like the scanner).
@@ -586,17 +607,12 @@ fn child_index_survives_prune_and_remerge() {
         mtime: None,
     };
     let second: Vec<_> = (0..10).map(|i| sub_meta(&format!("old{i}"))).collect();
-    assert_eq!(tree.merge_entries(second, &mut known), 10);
+    assert_eq!(tree.merge_entries(second), 10);
     assert!(tree.find(&child_path.join("old9")).is_some());
 
     // Cache-refresh prune on d007: forget the stale subtree and clear it,
-    // exactly like the DirListed handler does for a measured folder.
-    let stale = {
-        let node = tree.find(&child_path).unwrap();
-        let mut subtree = HashSet::new();
-        node.collect_paths(&mut subtree);
-        subtree
-    };
+    // exactly like the DirListed handler does for a measured folder. No
+    // separate path set is maintained, so there is nothing else to remove.
     {
         let node = tree.find_mut(&child_path).unwrap();
         node.clear_children();
@@ -604,14 +620,11 @@ fn child_index_survives_prune_and_remerge() {
         node.items = 1;
         node.measured = false;
     }
-    for p in &stale {
-        known.remove(p);
-    }
 
     // Re-list 40 fresh children (> threshold): the index rebuilds and deep
     // descents through it must find the new paths, not the stale ones.
     let third: Vec<_> = (0..40).map(|i| sub_meta(&format!("new{i:02}"))).collect();
-    assert_eq!(tree.merge_entries(third, &mut known), 40);
+    assert_eq!(tree.merge_entries(third), 40);
     assert!(tree.find(&child_path.join("new39")).is_some());
     assert!(tree.find(&child_path.join("old9")).is_none());
     assert!(tree.find(&parent.join("d050")).is_some());
@@ -681,11 +694,15 @@ fn cached_scan_roundtrips_through_a_real_scan() {
     assert!(root.find(&sub.join("note.txt")).is_some());
     assert!(root.find(&dir.join("big.bin")).is_some());
 
-    // The stale-children refresh rule the UI applies on DirListed for a
-    // measured (cache-loaded) directory.
-    let mut known = std::collections::HashSet::new();
-    root.collect_paths(&mut known);
-    assert_eq!(known.len(), 4); // root, big.bin, sub, note.txt
+    // Exactly one node per entry: the UI no longer keeps a parallel set of
+    // full path strings alongside the tree.
+    let mut stack = vec![root];
+    let mut count = 0;
+    while let Some(node) = stack.pop() {
+        count += 1;
+        stack.extend(node.children.iter());
+    }
+    assert_eq!(count, 4); // root, big.bin, sub, note.txt
 
     fs::remove_dir_all(&dir).ok();
 }

@@ -76,9 +76,6 @@ struct WindowState {
     scan: Option<ScanHandle>,
     /// Measured scan tree root (None until the first DirListed arrives).
     tree: Option<DisplayNode>,
-    /// Paths already merged into `tree` (fresh per scan) — the O(1)
-    /// duplicate guard for `merge_entries` (see models.rs).
-    known: HashSet<PathBuf>,
     /// Folders expanded inline in the list.
     expanded: HashSet<PathBuf>,
     /// Folder the list currently shows (navigation inside a scan).
@@ -218,7 +215,6 @@ impl ArborUi {
                 current: None,
                 scan: None,
                 tree: None,
-                known: HashSet::new(),
                 expanded: HashSet::new(),
                 current_folder: PathBuf::new(),
                 pending_autoselect: false,
@@ -791,7 +787,6 @@ impl ArborUi {
             state.current = Some(path.to_path_buf());
             state.current_folder = path.to_path_buf();
             state.tree = None;
-            state.known.clear();
             state.expanded.clear();
             state.pending_autoselect = true;
             state.scan_entries = 0;
@@ -889,34 +884,31 @@ impl ArborUi {
                             own_size: 0,
                             mtime: None,
                         }));
-                        state.known.clear();
                     }
                     // Progress counters (user-requested scan progress bar).
                     state.scan_entries += entries.len() as u64;
                     state.scan_bytes += entries.iter().map(|e| e.own_size).sum::<u64>();
                     // Cache refresh: a listing for an already-measured
                     // directory can only happen when the tree came from the
-                    // snapshot cache — its children are stale. Drop them
-                    // (and their known-paths) so the fresh listing replaces
-                    // them; entries deleted since the snapshot disappear.
+                    // snapshot cache - its children are stale. Drop them so
+                    // the fresh listing replaces them; entries deleted since
+                    // the snapshot disappear. Removing the children also
+                    // removes them from duplicate detection (which looks at
+                    // the parent's current children), so no path set needs
+                    // pruning here.
                     let parents: HashSet<&Path> = entries
                         .iter()
                         .filter_map(|e| e.path.parent())
                         .collect();
-                    let WindowState { tree, known, .. } = &mut *state;
+                    let WindowState { tree, .. } = &mut *state;
                     if let Some(tree) = tree.as_mut() {
                         for parent in parents {
                             if let Some(node) = tree.find_mut(parent) {
                                 if node.is_dir && node.measured {
-                                    let mut subtree = HashSet::new();
-                                    node.collect_paths(&mut subtree);
-                                    for p in subtree {
-                                        known.remove(&p);
-                                    }
                                     node.clear_children();
                                     // Reset to a fresh-scan look: own data
                                     // only, unmeasured (amber) until this
-                                    // folder's new DirMeasured arrives —
+                                    // folder's new DirMeasured arrives -
                                     // finalize_from_children would wrongly
                                     // flag the partial numbers as final.
                                     node.size = node.own_size;
@@ -927,12 +919,13 @@ impl ArborUi {
                         }
                     }
                     // Merge entries under their own parents (shared with the
-                    // protocol tests). The batch is consumed: node names move
-                    // into the tree instead of being cloned per record.
-                    let WindowState { tree, known, rows_dirty, tree_gen, .. } = &mut *state;
+                    // protocol tests). The batch is consumed: both the names
+                    // and the full path buffers move into the tree rather
+                    // than being cloned per record.
+                    let WindowState { tree, rows_dirty, tree_gen, .. } = &mut *state;
                     tree.as_mut()
                         .expect("tree was just created")
-                        .merge_entries(entries, known);
+                        .merge_entries(entries);
                     // Repaint on the throttle in repaint_rows, not per event —
                     // a home-folder scan would otherwise rebuild O(rows) per
                     // directory and O(subtree) for the charts.
@@ -1203,7 +1196,23 @@ impl ArborUi {
     /// Return to the start page (Back/Escape), stopping any running scan.
     pub fn show_start(self: &Rc<Self>) {
         self.cancel_scan();
-        self.state.borrow_mut().current = None;
+        // A 2.2M-entry scan keeps the whole snapshot, its chart projections
+        // and every visible ScanRow alive. Going back used to leave all of
+        // them resident behind the start page; release them here. This is
+        // pure cleanup on a page switch, so it costs nothing while scanning.
+        {
+            let mut state = self.state.borrow_mut();
+            state.current = None;
+            state.tree = None;
+            state.expanded.clear();
+            state.rings_cache = None;
+            state.treemap_cache = None;
+            state.rows_dirty = false;
+        }
+        self.result_view.rings_chart.set_state(None);
+        self.result_view.treemap_chart.set_state(None);
+        self.result_view.set_rows(&[]);
+        *self.item_popover.borrow_mut() = None;
         self.back_btn.set_visible(false);
         self.rescan_btn.set_visible(false);
         // The Main Menu lives on the start-page header (docs/01 §1).

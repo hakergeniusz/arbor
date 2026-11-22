@@ -6,7 +6,7 @@
 // Some helpers are consumed by later phases or unit tests.
 #![allow(dead_code)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -202,16 +202,6 @@ impl DisplayNode {
         self.measured = true;
     }
 
-    /// Every path in this subtree including `self` — used to pre-fill the
-    /// merge duplicate-guard when a cached snapshot is restored (the refresh
-    /// scan must treat already-known paths as duplicates).
-    pub fn collect_paths(&self, out: &mut HashSet<PathBuf>) {
-        out.insert(self.path.clone());
-        for child in &self.children {
-            child.collect_paths(out);
-        }
-    }
-
     /// Remove the node at `path` from the tree and recompute every
     /// ancestor's aggregates (docs/06 R8: fresh totals after a trash
     /// operation). Returns the detached node.
@@ -242,16 +232,16 @@ impl DisplayNode {
     /// merged. Duplicates are skipped — a later `DirMeasured` refines them.
     /// This is the exact merge the UI performs per scanner update.
     ///
-    /// `known` is the caller-owned set of already-merged paths, fresh per
-    /// scan. The duplicate guard used to be a linear scan of the parent's
-    /// children, which made one flat directory of n entries cost O(n²) on
-    /// the main loop and froze real home-folder scans; a hashed set keeps
-    /// the merge O(1) per entry.
-    pub fn merge_entries(
-        &mut self,
-        entries: Vec<EntryMeta>,
-        known: &mut HashSet<PathBuf>,
-    ) -> usize {
+    /// Duplicate detection uses the parent folder's name index: names are
+    /// unique within a directory, so an existing child with this name is the
+    /// same path. That index makes the guard O(1) on wide folders (and a
+    /// bounded <32-item scan on small ones), so no whole-scan set of full
+    /// path strings is needed. A previous version kept every merged path in
+    /// a `HashSet<PathBuf>` for the entire scan - on a 2.2M-entry home scan
+    /// that duplicate set alone cost hundreds of MB. It also had to be
+    /// manually pruned; children removed from the tree here simply stop
+    /// being duplicates, with no bookkeeping.
+    pub fn merge_entries(&mut self, entries: Vec<EntryMeta>) -> usize {
         // Group by parent so a batch performs one root-to-parent walk per
         // directory, not one per entry — but keep the groups in
         // first-appearance order: a batch may contain a directory and its
@@ -274,37 +264,32 @@ impl DisplayNode {
         for (parent_path, metas) in groups {
             let Some(parent) = self.find_mut(&parent_path) else { continue };
             for meta in metas {
-                if !known.insert(meta.path.clone()) {
-                    continue; // already known; DirMeasured refines it
+                // Compare the raw path component, not the lossy UTF-8 name:
+                // a non-UTF-8 filename would otherwise not match the index
+                // key built from `path.file_name()` and be merged twice.
+                if meta
+                    .path
+                    .file_name()
+                    .map_or(false, |name| parent.child_by_name(name).is_some())
+                {
+                    continue; // already merged; DirMeasured refines it
                 }
-                let node = if meta.is_dir {
-                    DisplayNode {
-                        name: meta.name, // moved: the entry is consumed
-                        path: meta.path.clone(),
-                        is_dir: true,
-                        error: meta.error,
-                        own_size: meta.own_size,
-                        size: meta.own_size,
-                        items: 1,
-                        mtime: meta.mtime,
-                        measured: false,
-                        children: Vec::new(),
-                        child_index: None,
-                    }
-                } else {
-                    DisplayNode {
-                        name: meta.name,
-                        path: meta.path.clone(),
-                        is_dir: false,
-                        error: false,
-                        own_size: meta.own_size,
-                        size: meta.own_size,
-                        items: 1,
-                        mtime: meta.mtime,
-                        measured: true,
-                        children: Vec::new(),
-                        child_index: None,
-                    }
+                // Move both strings out of the consumed entry. Cloning the
+                // full absolute path per entry allocated a second copy of
+                // every path on a 2.2M-entry scan; the wire record's buffer
+                // now becomes the node's buffer directly.
+                let node = DisplayNode {
+                    name: meta.name,
+                    path: meta.path,
+                    is_dir: meta.is_dir,
+                    error: meta.error && meta.is_dir,
+                    own_size: meta.own_size,
+                    size: meta.own_size,
+                    items: 1,
+                    mtime: meta.mtime,
+                    measured: !meta.is_dir,
+                    children: Vec::new(),
+                    child_index: None,
                 };
                 parent.size += node.size;
                 parent.items += 1;

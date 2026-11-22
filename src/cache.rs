@@ -449,7 +449,6 @@ fn read_i64(r: &mut impl Read) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
     use std::time::Duration;
 
     /// Fresh per-test cache base + scan root under the OS temp dir.
@@ -560,24 +559,6 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"NOTACACHE!!!!!!!!").unwrap();
         assert!(load_in(&fx.base, &fx.root).is_none());
-    }
-
-    #[test]
-    fn collect_paths_lists_every_node() {
-        let fx = Fixture::new("paths");
-        let mut writer = Writer::create_in(&fx.base, &fx.root, 1).unwrap();
-        let root_idx = writer.record(None, "paths-root", true, false, 4096, Some(1)).unwrap();
-        let sub = writer.record(Some(root_idx), "sub", true, false, 4096, Some(1)).unwrap();
-        writer.record(Some(sub), "f.txt", false, false, 1, Some(1)).unwrap();
-        writer.finish();
-
-        let cached = load_in(&fx.base, &fx.root).unwrap();
-        let mut paths = HashSet::new();
-        cached.root.collect_paths(&mut paths);
-        assert_eq!(paths.len(), 3);
-        assert!(paths.contains(&fx.root));
-        assert!(paths.contains(&fx.root.join("sub")));
-        assert!(paths.contains(&fx.root.join("sub").join("f.txt")));
     }
 
     /// A Writer dropped without finish() (cancelled or failed scan) must
