@@ -25,6 +25,15 @@
   </categories>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="51.0.0-beta.3" date="2026-11-22">
+      <description>
+        <p>Third public beta: full-tree scans use substantially less memory.
+        The whole-scan set of full path strings is gone, entry path buffers
+        are moved into the scan tree instead of cloned, and returning to the
+        start page now releases the scan snapshot, rows and chart caches.
+        Merging 500k entries measured ~3x faster with ~21% lower peak RSS.</p>
+      </description>
+    </release>
     <release version="51.0.0-beta.2" date="2026-11-08">
       <description>
         <p>Second public beta: opening a previously scanned folder restores

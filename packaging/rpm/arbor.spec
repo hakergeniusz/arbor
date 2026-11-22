@@ -2,11 +2,11 @@
 # (or packaging/scripts/build-rpm.sh, which drives a fedora container)
 Name:           arbor
 Version:        51.0.0
-Release:        0.2.beta2%{?dist}
+Release:        0.3.beta3%{?dist}
 Summary:        See where your disk space grows — a disk usage analyzer
 License:        MIT
 URL:            https://github.com/hakergeniusz/arbor
-Source0:        %{url}/archive/refs/tags/v51.0.0-beta.2.tar.gz
+Source0:        %{url}/archive/refs/tags/v51.0.0-beta.3.tar.gz
 
 # rust tier-1: covers x86_64 and aarch64; the macro needs rust-srpm-macros,
 # fall back to the explicit list where it is not installed
@@ -32,7 +32,7 @@ code.}
 %{_description}
 
 %prep
-%autosetup -n arbor-v51.0.0-beta.2
+%autosetup -n arbor-v51.0.0-beta.3
 
 %build
 cargo build --release --locked
@@ -58,6 +58,10 @@ cargo test --locked
 %{_datadir}/icons/hicolor/scalable/apps/io.github.hakergeniusz.Arbor.svg
 
 %changelog
+* Sun Nov 22 2026 hakergeniusz <hakergeniusz@users.noreply.github.com> - 51.0.0-0.3.beta3
+- Third public beta: lower peak RSS on full-tree scans (no whole-scan path
+  set, moved path buffers, snapshot freed on returning to the start page);
+  merging 500k entries is ~3x faster with ~21% lower peak RSS.
 * Sun Nov 08 2026 hakergeniusz <hakergeniusz@users.noreply.github.com> - 51.0.0-0.2.beta2
 - Second public beta: cache hits no longer rescan; scan-ingest tail ~3x
   faster (cold open 1.75 s vs Baobab 2.25 s on the 101k-item benchmark).

@@ -1,3 +1,12 @@
+arbor (51.0.0~beta.3-1) unstable; urgency=medium
+
+  * Third public beta: full-tree scans keep far less memory - the whole-scan
+    set of full path strings is gone, entry path buffers are moved rather
+    than cloned, and returning to the start page releases the scan snapshot.
+    Merging 500k entries is ~3x faster with ~21% lower peak RSS.
+
+ -- hakergeniusz <hakergeniusz@users.noreply.github.com>  Sun, 22 Nov 2026 18:00:00 +0100
+
 arbor (51.0.0~beta.2-1) unstable; urgency=medium
 
   * Second public beta: cache hits no longer trigger a rescan (the Rescan

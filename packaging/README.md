@@ -18,7 +18,7 @@ need `docker` with root for the Debian/Fedora chroot builds, `makepkg`,
 `flatpak-builder` with the `org.gnome.Sdk//51` runtime, and `zstd`):
 
 ```
-packaging/scripts/make-tarball.sh v51.0.0-beta.2     # git-archive source tarball
+packaging/scripts/make-tarball.sh v51.0.0-beta.3     # git-archive source tarball
 packaging/scripts/build-arch.sh                      # makepkg → .pkg.tar.zst
 packaging/scripts/build-deb.sh                       # debian:trixie → .deb
 packaging/scripts/build-rpm.sh                       # fedora:latest → .rpm
@@ -33,7 +33,7 @@ cp -r packaging/debian .        # debian/ must sit at the source root
 dpkg-buildpackage -us -uc -b
 ```
 
-Produces `../arbor_51.0.0~beta.2-1_<arch>.deb`. `Architecture: any` — builds
+Produces `../arbor_51.0.0~beta.3-1_<arch>.deb`. `Architecture: any` — builds
 on `amd64` and `arm64`. The released .deb is built against Ubuntu 25.10's
 stack (libadwaita 1.9), so it needs Ubuntu 25.10+ / Debian sid-or-newer at
 runtime; the package's Depends carry the exact floors of the build image.
@@ -41,11 +41,11 @@ runtime; the package's Depends carry the exact floors of the build image.
 ## RPM
 
 ```
-rpmbuild -ba packaging/rpm/arbor.spec    # from the v51.0.0-beta.2 source tarball
+rpmbuild -ba packaging/rpm/arbor.spec    # from the v51.0.0-beta.3 source tarball
 ```
 
 `ExclusiveArch: %{rust_tier1_arches}` — x86_64 and aarch64. Pre-release
-versioning per Fedora guidelines: `51.0.0-0.2.beta2`.
+versioning per Fedora guidelines: `51.0.0-0.3.beta3`.
 
 ## Arch Linux
 
@@ -53,7 +53,7 @@ versioning per Fedora guidelines: `51.0.0-0.2.beta2`.
 cd packaging/arch && makepkg -p PKGBUILD
 ```
 
-Installs with `pacman -U arbor-51.0.0beta2-1-x86_64.pkg.tar.zst`.
+Installs with `pacman -U arbor-51.0.0beta3-1-x86_64.pkg.tar.zst`.
 `arch=('x86_64' 'aarch64')`. Replace `sha256sums=('SKIP')` with the real
 checksum when cutting the release tarball.
 
